@@ -936,6 +936,25 @@ void scanSymbols() {
           }
        } else {
           noSig++;
+          if (tickCount % gLogEvery == 0) {
+             double imb2 = calcTickImbalance(s);
+             double sc2 = calcSpreadCompression(s);
+             double vl2 = calcQuoteVelocity(s);
+             double pl2 = calcMicroPullback(s);
+             double sy2 = calcCrossSync(s);
+             double en2 = calcTickEntropy(s);
+             int agree = 0;
+             if (imb2 > 0) agree++;
+             if (sc2 > 0) agree++;
+             if (vl2 > 0) agree++;
+             if (pl2 > 0) agree++;
+             if (sy2 > 0) agree++;
+             if (en2 > 0) agree++;
+             Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
+                   " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
+                   " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
+                   " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2));
+          }
        }
     }
 
