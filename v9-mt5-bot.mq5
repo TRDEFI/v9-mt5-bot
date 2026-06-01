@@ -486,15 +486,13 @@ double calcCrossSync(int s) {
     string sym = syms[s];
     int agrees = 0;
     int total = 0;
-    int rows = ArraySize(corrGroups);
-    int cols = (rows > 0) ? ArraySize(corrGroups[0]) : 0;
-    for (int g = 0; g < rows; g++) {
+    for (int g = 0; g < 5; g++) {
        bool found = false;
-       for (int m = 0; m < cols; m++) {
+       for (int m = 0; m < 3; m++) {
           if (corrGroups[g][m] == sym) { found = true; break; }
        }
        if (!found) continue;
-       for (int m = 0; m < cols; m++) {
+       for (int m = 0; m < 3; m++) {
           if (corrGroups[g][m] == sym) continue;
           int otherIdx = -1;
           for (int k = 0; k < symCount; k++) {
@@ -566,14 +564,10 @@ bool isDailyLossLimitHit() {
 
 bool hasCorrelatedOpen(string sym) {
     if (!gCorrelationFilter || !gScalpMode) return false;
-    int rows = ArraySize(corrGroups);
-    if (rows <= 0) return false;
-    for (int g = 0; g < rows; g++) {
+    for (int g = 0; g < 5; g++) {
        bool symInGroup = false;
        int otherCount = 0;
-       int cols = ArraySize(corrGroups[g]);
-       for (int m = 0; m < cols; m++) {
-          if (m >= rows) break;
+       for (int m = 0; m < 3; m++) {
           if (corrGroups[g][m] == sym) symInGroup = true;
           else {
              for (int k = 0; k < symCount; k++) {
