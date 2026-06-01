@@ -910,38 +910,38 @@ void scanSymbols() {
     Print("SCAN_LOOP start symCount=", symCount, " openCount=", openCount, " maxOpen=", gMaxOpen);
 
     for (int s = 0; s < symCount; s++) {
-      if (openCount + placed >= gMaxOpen) break;
-      if (hasPos(syms[s])) { skippedPos++; continue; }
-      if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
-      if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
+       if (openCount + placed >= gMaxOpen) break;
+       if (hasPos(syms[s])) { skippedPos++; continue; }
+       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
+       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
-      MqlRates r1[], r5[], r15[];
-      int got1, got5, got15;
-      if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
-         noSig++; continue;
-      }
+       MqlRates r1[], r5[], r15[];
+       int got1, got5, got15;
+       if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
+          noSig++; Print("NO_DATA: ", syms[s], " got1=", got1, " got5=", got5, " got15=", got15); continue;
+       }
 
-      double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
-      if (sp > gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)) { skippedSpread++; continue; }
+       double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
+       if (sp > gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)) { skippedSpread++; Print("SKIP_SPREAD: ", syms[s], " sp=", sp, " max=", gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)); continue; }
 
-      double atr = calcAtr(r1, got1, 14);
-      double minAtr = gAtrMinPips * 10 * SymbolInfoDouble(syms[s], SYMBOL_POINT);
-      if (atr < minAtr) { noSig++; continue; }
+       double atr = calcAtr(r1, got1, 14);
+       double minAtr = gAtrMinPips * 10 * SymbolInfoDouble(syms[s], SYMBOL_POINT);
+       if (atr < minAtr) { noSig++; Print("SKIP_ATR: ", syms[s], " atr=", DoubleToString(atr,5), " min=", DoubleToString(minAtr,5)); continue; }
 
-      HybridSignal sig;
-      if (getHybridSignal(s, sig)) {
-         if (tickCount % gLogEvery == 0)
-            Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
-                  " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
-                  " spreadComp=", DoubleToString(calcSpreadCompression(s), 2));
-         if (execScalpTrade(syms[s], sig)) {
-            ts[s].lastSignalTime = TimeCurrent();
-            placed++;
-         }
-      } else {
-         noSig++;
-      }
-   }
+       HybridSignal sig;
+       if (getHybridSignal(s, sig)) {
+          if (tickCount % gLogEvery == 0)
+             Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
+                   " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
+                   " spreadComp=", DoubleToString(calcSpreadCompression(s), 2));
+          if (execScalpTrade(syms[s], sig)) {
+             ts[s].lastSignalTime = TimeCurrent();
+             placed++;
+          }
+       } else {
+          noSig++;
+       }
+    }
 
    if (tickCount % gLogEvery == 0)
       Print("=== SCAN | open=", openCount, " placed=", placed,
