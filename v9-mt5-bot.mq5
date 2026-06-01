@@ -908,13 +908,16 @@ void scanSymbols() {
 
     int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
     Print("SCAN_LOOP start symCount=", symCount, " openCount=", openCount, " maxOpen=", gMaxOpen);
+    Print("SCAN_BEFORE_LOOP tickCount=", tickCount);
 
     for (int s = 0; s < symCount; s++) {
-       if (openCount + placed >= gMaxOpen) break;
-       if (hasPos(syms[s])) { skippedPos++; continue; }
-       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
-       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
+       Print("SYM_SCAN: idx=", s, " sym=", syms[s]);
+       if (openCount + placed >= gMaxOpen) { Print("SYM_SKIP maxOpen"); break; }
+       if (hasPos(syms[s])) { skippedPos++; Print("SYM_SKIP hasPos"); continue; }
+       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; Print("SYM_SKIP cooldown"); continue; }
+       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; Print("SYM_SKIP correlated"); continue; }
 
+       Print("SYM_GETRATES: ", syms[s]);
        MqlRates r1[], r5[], r15[];
        int got1, got5, got15;
        if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
