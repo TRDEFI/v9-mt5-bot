@@ -483,31 +483,33 @@ double calcMicroPullback(int s) {
 }
 
 double calcCrossSync(int s) {
-   string sym = syms[s];
-   int agrees = 0;
-   int total = 0;
-   for (int g = 0; g < ArraySize(corrGroups); g++) {
-      bool found = false;
-      for (int m = 0; m < 3; m++) {
-         if (corrGroups[g][m] == sym) { found = true; break; }
-      }
-      if (!found) continue;
-      for (int m = 0; m < 3; m++) {
-         if (corrGroups[g][m] == sym) continue;
-         int otherIdx = -1;
-         for (int k = 0; k < symCount; k++) {
-            if (syms[k] == corrGroups[g][m]) { otherIdx = k; break; }
-         }
-         if (otherIdx < 0) continue;
-         total++;
-         if (symSt[s].impulseDir != 0 && symSt[otherIdx].impulseDir != 0 &&
-             symSt[s].impulseDir == symSt[otherIdx].impulseDir) {
-            agrees++;
-         }
-      }
-   }
-   if (total >= 2 && agrees >= 2) return 1.0;
-   return 0;
+    string sym = syms[s];
+    int agrees = 0;
+    int total = 0;
+    int rows = ArraySize(corrGroups);
+    int cols = (rows > 0) ? ArraySize(corrGroups[0]) : 0;
+    for (int g = 0; g < rows; g++) {
+       bool found = false;
+       for (int m = 0; m < cols; m++) {
+          if (corrGroups[g][m] == sym) { found = true; break; }
+       }
+       if (!found) continue;
+       for (int m = 0; m < cols; m++) {
+          if (corrGroups[g][m] == sym) continue;
+          int otherIdx = -1;
+          for (int k = 0; k < symCount; k++) {
+             if (syms[k] == corrGroups[g][m]) { otherIdx = k; break; }
+          }
+          if (otherIdx < 0) continue;
+          total++;
+          if (symSt[s].impulseDir != 0 && symSt[otherIdx].impulseDir != 0 &&
+              symSt[s].impulseDir == symSt[otherIdx].impulseDir) {
+             agrees++;
+          }
+       }
+    }
+    if (total >= 2 && agrees >= 2) return 1.0;
+    return 0;
 }
 
 double calcTickEntropy(int s) {
