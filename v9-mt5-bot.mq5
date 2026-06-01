@@ -446,11 +446,11 @@ double calcTickImbalance(int s) {
       if (symSt[s].ticks[idx].bid > symSt[s].ticks[prev].bid) up++;
       else if (symSt[s].ticks[idx].bid < symSt[s].ticks[prev].bid) down++;
    }
-   int total = up + down;
-   if (total < 15) return 0;
-   double ratio = (double)MathMax(up, down) / total;
-   if (ratio >= 0.70) return ratio;
-   return 0;
+    int total = up + down;
+    if (total < 10) return 0;
+    double ratio = (double)MathMax(up, down) / total;
+    if (ratio >= 0.55) return ratio;
+    return 0;
 }
 
 double calcSpreadCompression(int s) {
@@ -459,7 +459,7 @@ double calcSpreadCompression(int s) {
    double old = symSt[s].spreadHistory[(symSt[s].spreadHead - 4 + 20) % 20];
    if (old <= 0) return 0;
    double compression = (old - cur) / old;
-   if (compression >= 0.30 && cur < 3.0) return compression;
+    if (compression >= 0.20 && cur < 3.0) return compression;
    return 0;
 }
 
@@ -634,15 +634,25 @@ bool getHybridSignal(int s, HybridSignal &out) {
       if (side == 0) side = eSide; else if (side != eSide) agreeing--;
    }
 
-   if (agreeing < gMinAgreeing || side == 0) return false;
+    if (agreeing < gMinAgreeing || side == 0) {
+       int mtfSide = 0;
+       double mtfScore = calcMtfSignal(s, mtfSide);
+       if (mtfScore > 0 && mtfSide != 0) {
+          out.name = "MTF_SCALP";
+          out.score = mtfScore;
+          out.side = mtfSide;
+          return true;
+       }
+       return false;
+    }
 
-   double composite = gWTickImb * imb + gWSpreadComp * spreadComp + gWQuoteVel * vel + gWMicroPull * pull + gWCrossSync * sync + gWEntropy * entropy;
-   if (composite < gMinScore) return false;
+    double composite = gWTickImb * imb + gWSpreadComp * spreadComp + gWQuoteVel * vel + gWMicroPull * pull + gWCrossSync * sync + gWEntropy * entropy;
+    if (composite < gMinScore) return false;
 
-   out.name = "HYBRID_SCALP";
-   out.score = composite;
-   out.side = side;
-   return true;
+    out.name = "HYBRID_SCALP";
+    out.score = composite;
+    out.side = side;
+    return true;
 }
 
 //+------------------------------------------------------------------+
@@ -1156,6 +1166,51 @@ double calcAdx(const MqlRates &r[], int total, int p = 14) {
    minusDM = 100.0 * minusDM / tr;
    double dx = MathAbs(plusDM - minusDM) / (plusDM + minusDM) * 100;
    return dx;
+}
+
+double calcMtfSignal(int s, int &side) {
+    MqlRates r1[], r5[], r15[];
+    int got1, got5, got15;
+    if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) return 0;
+    if (got1 < 20 || got5 < 20 || got15 < 20) return 0;
+
+    double macd1, sig1, macd5, sig5, macd15, sig15;
+    calcMacd(r1, got1, 12, 26, 9, macd1, sig1);
+    calcMacd(r5, got5, 12, 26, 9, macd5, sig5);
+    calcMacd(r15, got15, 12, 26, 9, macd15, sig15);
+
+    double k1, d1, k5, d5, k15, d15;
+    calcStoch(r1, got1, 14, 3, k1, d1);
+    calcStoch(r5, got5, 14, 3, k5, d5);
+    calcStoch(r15, got15, 14, 3, k15, d15);
+
+    double adx1 = calcAdx(r1, got1, 14);
+    double adx5 = calcAdx(r5, got5, 14);
+    double adx15 = calcAdx(r15, got15, 14);
+
+    int bull = 0;
+    if (macd1 > sig1) bull++;
+    if (macd5 > sig5) bull++;
+    if (macd15 > sig15) bull++;
+    if (k1 > d1 && k1 < 80) bull++;
+    if (k5 > d5 && k5 < 80) bull++;
+    if (k15 > d15 && k15 < 80) bull++;
+    if (adx1 > 20) bull++;
+    if (adx5 > 20) bull++;
+
+    int bear = 0;
+    if (macd1 < sig1) bear++;
+    if (macd5 < sig5) bear++;
+    if (macd15 < sig15) bear++;
+    if (k1 < d1 && k1 > 20) bear++;
+    if (k5 < d5 && k5 > 20) bear++;
+    if (k15 < d15 && k15 > 20) bear++;
+    if (adx1 > 20) bear++;
+    if (adx5 > 20) bear++;
+
+    if (bull >= 5 && bull > bear) { side = 1; return 0.65; }
+    if (bear >= 5 && bear > bull) { side = -1; return 0.65; }
+    return 0;
 }
 
 //+------------------------------------------------------------------+
