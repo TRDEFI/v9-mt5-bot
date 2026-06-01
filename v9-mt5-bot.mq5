@@ -256,21 +256,21 @@ void Trim(string &s) {
 }
 
 void ReadConfig() {
-   gSymbols = InpSymbols; gRiskPct = InpRiskPercent; gMaxOpen = InpMaxOpen; gMagic = (long)InpMagic;
-   gMinScore = InpMinScore; gMaxSpread = InpMaxSpread;
-   gCooldown = InpCooldownSec; gMinSL = InpMinSLPips; gMaxSL = InpMaxSLPips;
-   gTimeStop = InpTimeStopSec; gBE = InpBreakevenPips; gTrail = InpTrail; gTrailPips = InpTrailPips;
-   gLogEvery = InpLogEvery; gTargetProfit = InpTargetProfit; gTrackExecution = InpTrackExecution;
-   gSnapIntervalSec = InpSnapIntervalSec; gTrackBridgeCloses = InpTrackBridgeCloses;
-   gLogClosedEvery = InpLogClosedEvery;
-   gScalpMode = InpScalpMode;
-   gWTickImb = InpWTickImb; gWSpreadComp = InpWSpreadComp; gWQuoteVel = InpWQuoteVel;
-   gWMicroPull = InpWMicroPull; gWCrossSync = InpWCrossSync; gWEntropy = InpWEntropy;
-   gMinAgreeing = InpMinAgreeing;
-   gKillLondon = InpKillLondon; gKillLondonStart = InpKillLondonStart; gKillLondonEnd = InpKillLondonEnd;
-   gKillNY = InpKillNY; gKillNYStart = InpKillNYStart; gKillNYEnd = InpKillNYEnd;
-   gKillAsian = InpKillAsian; gKillAsianStart = InpKillAsianStart; gKillAsianEnd = InpKillAsianEnd;
-   gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips;
+    gSymbols = InpSymbols; gRiskPct = InpRiskPercent; gMaxOpen = InpMaxOpen; gMagic = (long)InpMagic;
+    gMinScore = InpMinScore; gMaxSpread = InpMaxSpread;
+    gCooldown = InpCooldownSec; gMinSL = InpMinSLPips; gMaxSL = InpMaxSLPips;
+    gTimeStop = InpTimeStopSec; gBE = InpBreakevenPips; gTrail = InpTrail; gTrailPips = InpTrailPips;
+    gLogEvery = InpLogEvery; gTargetProfit = InpTargetProfit; gTrackExecution = InpTrackExecution;
+    gSnapIntervalSec = InpSnapIntervalSec; gTrackBridgeCloses = InpTrackBridgeCloses;
+    gLogClosedEvery = InpLogClosedEvery;
+    gScalpMode = InpScalpMode;
+    gWTickImb = InpWTickImb; gWSpreadComp = InpWSpreadComp; gWQuoteVel = InpWQuoteVel;
+    gWMicroPull = InpWMicroPull; gWCrossSync = InpWCrossSync; gWEntropy = InpWEntropy;
+    gMinAgreeing = InpMinAgreeing;
+    gKillLondon = InpKillLondon; gKillLondonStart = (InpKillLondonStart/100)*60 + (InpKillLondonStart%100); gKillLondonEnd = (InpKillLondonEnd/100)*60 + (InpKillLondonEnd%100);
+    gKillNY = InpKillNY; gKillNYStart = (InpKillNYStart/100)*60 + (InpKillNYStart%100); gKillNYEnd = (InpKillNYEnd/100)*60 + (InpKillNYEnd%100);
+    gKillAsian = InpKillAsian; gKillAsianStart = (InpKillAsianStart/100)*60 + (InpKillAsianStart%100); gKillAsianEnd = (InpKillAsianEnd/100)*60 + (InpKillAsianEnd%100);
+    gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips;
 
    int h = FileOpen(CONFIG_FILE, FILE_TXT|FILE_READ|FILE_ANSI);
    if (h == INVALID_HANDLE) {
@@ -318,15 +318,15 @@ void ReadConfig() {
       else if (key == "W_CROSS_SYNC") gWCrossSync = StringToDouble(val);
       else if (key == "W_ENTROPY") gWEntropy = StringToDouble(val);
       else if (key == "MIN_AGREEING") gMinAgreeing = (int)StringToInteger(val);
-      else if (key == "KILL_LONDON") gKillLondon = (StringToInteger(val) != 0);
-      else if (key == "KILL_LONDON_START") gKillLondonStart = (int)StringToInteger(val);
-      else if (key == "KILL_LONDON_END") gKillLondonEnd = (int)StringToInteger(val);
-      else if (key == "KILL_NY") gKillNY = (StringToInteger(val) != 0);
-      else if (key == "KILL_NY_START") gKillNYStart = (int)StringToInteger(val);
-      else if (key == "KILL_NY_END") gKillNYEnd = (int)StringToInteger(val);
-      else if (key == "KILL_ASIAN") gKillAsian = (StringToInteger(val) != 0);
-      else if (key == "KILL_ASIAN_START") gKillAsianStart = (int)StringToInteger(val);
-      else if (key == "KILL_ASIAN_END") gKillAsianEnd = (int)StringToInteger(val);
+       else if (key == "KILL_LONDON") gKillLondon = (StringToInteger(val) != 0);
+       else if (key == "KILL_LONDON_START") gKillLondonStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+       else if (key == "KILL_LONDON_END") gKillLondonEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+       else if (key == "KILL_NY") gKillNY = (StringToInteger(val) != 0);
+       else if (key == "KILL_NY_START") gKillNYStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+       else if (key == "KILL_NY_END") gKillNYEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+       else if (key == "KILL_ASIAN") gKillAsian = (StringToInteger(val) != 0);
+       else if (key == "KILL_ASIAN_START") gKillAsianStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+       else if (key == "KILL_ASIAN_END") gKillAsianEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
       else if (key == "DAILY_LOSS_PCT") gDailyLossPct = StringToDouble(val);
       else if (key == "CORRELATION_FILTER") gCorrelationFilter = (StringToInteger(val) != 0);
       else if (key == "ATR_MIN_PIPS") gAtrMinPips = StringToDouble(val);
@@ -337,7 +337,8 @@ void ReadConfig() {
 
 //+------------------------------------------------------------------+
 int OnInit() {
-   ReadConfig();
+    Print("=== OnInit START ===");
+    ReadConfig();
    trade.SetExpertMagicNumber((int)gMagic);
    string parts[];
    int n = StringSplit(gSymbols, ',', parts);
@@ -356,14 +357,21 @@ int OnInit() {
       symSt[i].ticksPerSecond = 0; symSt[i].lastVelocity = 0;
       symSt[i].lastImpulseTime = 0; symSt[i].impulseDir = 0;
    }
-   EventSetMillisecondTimer(timerMs);
-   Print("v9-mt5-bot v3.00 SCALPING ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
+    Print("BEFORE_TIMER timerMs=", timerMs);
+    bool timerOk = EventSetMillisecondTimer(timerMs);
+    Print("AFTER_TIMER ok=", timerOk, " timerMs=", timerMs);
+    if (!timerOk) {
+       Print("TIMER_FAILED — falling back to EventSetTimer(1)");
+       EventSetTimer(1);
+    }
+    Print("v9-mt5-bot v3.00 SCALPING ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
    Print("Mode: ", (gScalpMode ? "SCALP" : "NORMAL"), " | Risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, " pips");
    Print("Hybrid: TICK_IMB=", DoubleToString(gWTickImb,2), " SPREAD_COMP=", DoubleToString(gWSpreadComp,2),
          " QUOTE_VEL=", DoubleToString(gWQuoteVel,2), " MICRO_PULL=", DoubleToString(gWMicroPull,2),
          " CROSS_SYNC=", DoubleToString(gWCrossSync,2), " ENTROPY=", DoubleToString(gWEntropy,2));
-   Comment("v9-mt5-bot v3.00 SCALP\n", n, " symbols | risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, "p");
-   return INIT_SUCCEEDED;
+    Comment("v9-mt5-bot v3.00 SCALP\n", n, " symbols | risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, "p");
+    Print("=== OnInit END ===");
+    return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
@@ -555,21 +563,25 @@ bool isDailyLossLimitHit() {
 }
 
 bool hasCorrelatedOpen(string sym) {
-   if (!gCorrelationFilter || !gScalpMode) return false;
-   for (int g = 0; g < ArraySize(corrGroups); g++) {
-      bool symInGroup = false;
-      int otherCount = 0;
-      for (int m = 0; m < 3; m++) {
-         if (corrGroups[g][m] == sym) symInGroup = true;
-         else {
-            for (int k = 0; k < symCount; k++) {
-               if (syms[k] == corrGroups[g][m] && hasPos(syms[k])) otherCount++;
-            }
-         }
-      }
-      if (symInGroup && otherCount > 0) return true;
-   }
-   return false;
+    if (!gCorrelationFilter || !gScalpMode) return false;
+    int rows = ArraySize(corrGroups);
+    if (rows <= 0) return false;
+    for (int g = 0; g < rows; g++) {
+       bool symInGroup = false;
+       int otherCount = 0;
+       int cols = ArraySize(corrGroups[g]);
+       for (int m = 0; m < cols; m++) {
+          if (m >= rows) break;
+          if (corrGroups[g][m] == sym) symInGroup = true;
+          else {
+             for (int k = 0; k < symCount; k++) {
+                if (syms[k] == corrGroups[g][m] && hasPos(syms[k])) otherCount++;
+             }
+          }
+       }
+       if (symInGroup && otherCount > 0) return true;
+    }
+    return false;
 }
 
 //+------------------------------------------------------------------+
@@ -727,11 +739,12 @@ double calcTotalNetProfit() {
 //| Timer: main loop every 50ms                                      |
 //+------------------------------------------------------------------+
 void OnTimer() {
+   Print("TIMER tickCount=", tickCount, " symCount=", symCount);
    tickCount++;
 
-   // 1. feed ticks for all symbols
-   for (int s = 0; s < symCount; s++)
-      feedTickData(s);
+    // 1. feed ticks for all symbols
+    for (int s = 0; s < symCount; s++)
+       feedTickData(s);
 
    // 2. finalize completed seconds (legacy 1s klines)
    finalizeSecs();
@@ -882,20 +895,25 @@ void managePositions() {
 //| Scan all symbols for trade signals                                |
 //+------------------------------------------------------------------+
 void scanSymbols() {
-   if (!isKillZoneActive()) return;
-   if (isDailyLossLimitHit()) {
-      if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
-      return;
-   }
+   Print("SCAN_START killZone=", isKillZoneActive(), " dailyLoss=", isDailyLossLimitHit(), " tickCount=", tickCount);
+    if (!isKillZoneActive()) {
+       Print("SCAN_SKIPPED: kill zone inactive");
+       return;
+    }
+    if (isDailyLossLimitHit()) {
+       if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
+       return;
+    }
 
    int openCount = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
       if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) openCount++;
    }
 
-   int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
+    int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
+    Print("SCAN_LOOP start symCount=", symCount, " openCount=", openCount, " maxOpen=", gMaxOpen);
 
-   for (int s = 0; s < symCount; s++) {
+    for (int s = 0; s < symCount; s++) {
       if (openCount + placed >= gMaxOpen) break;
       if (hasPos(syms[s])) { skippedPos++; continue; }
       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
