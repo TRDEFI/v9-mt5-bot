@@ -2,10 +2,10 @@
 //|                                          v9-mt5-bot.mq5          |
 //+------------------------------------------------------------------+
 #property copyright "v9-mt5-bot"
-#property version   "2.10"
-#property description "1s kline from ticks + MTF signal + execution tracking"
-#property description "Scans symbols, builds 1s bars, RSI/EMA/BB/MACD/Stoch/ADX strategy"
-#property description "Tracks execution costs, closed trades, net profit targets"
+#property version   "3.00"
+#property description "Hybrid scalping EA with tick-level execution tracking"
+#property description "Tick imbalance + spread compression + quote velocity + micro pullback + cross sync + entropy"
+#property description "Kill-zone filter, correlation guard, daily loss limit"
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
@@ -15,23 +15,52 @@
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
 input string InpSymbols     = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,EURGBP,EURJPY,GBPJPY,XAUUSD,XAGUSD,US30,UK100";
-input double InpRiskPercent = 1.0;
-input int    InpMaxOpen     = 4;
+input double InpRiskPercent = 0.25;
+input int    InpMaxOpen     = 6;
 input int    InpMagic       = 999001;
-input double InpMinScore    = 0.75;
-input double InpMaxSpread   = 50.0;
-input int    InpCooldownSec = 300;
-input int    InpMinSLPips   = 15;
-input int    InpTimeStopMin = 240;
-input int    InpBreakevenPips = 10;
+input double InpMinScore    = 0.70;
+input double InpMaxSpread   = 30.0;
+input int    InpCooldownSec = 5;
+input int    InpMinSLPips   = 3;
+input int    InpMaxSLPips   = 5;
+input int    InpTimeStopSec = 45;
+input int    InpBreakevenPips = 2;
 input bool   InpTrail       = true;
-input int    InpTrailPips   = 15;
+input int    InpTrailPips   = 2;
 input int    InpLogEvery    = 10;
 input int    InpTargetProfit = 10;
 input bool   InpTrackExecution = true;
 input int    InpSnapIntervalSec = 5;
 input bool   InpTrackBridgeCloses = true;
 input int    InpLogClosedEvery = 1;
+
+// === Scalping mode ===
+input bool   InpScalpMode   = true;
+
+// === Hybrid detector weights (TICK_IMB + SPREAD_COMP primary) ===
+input double InpWTickImb    = 0.40;
+input double InpWSpreadComp = 0.30;
+input double InpWQuoteVel   = 0.15;
+input double InpWMicroPull  = 0.08;
+input double InpWCrossSync  = 0.04;
+input double InpWEntropy    = 0.03;
+input int    InpMinAgreeing = 2;
+
+// === Kill zones (all sessions enabled by default) ===
+input bool   InpKillLondon  = true;
+input int    InpKillLondonStart = 800;
+input int    InpKillLondonEnd   = 1200;
+input bool   InpKillNY      = true;
+input int    InpKillNYStart     = 1330;
+input int    InpKillNYEnd       = 1700;
+input bool   InpKillAsian    = true;
+input int    InpKillAsianStart  = 2200;
+input int    InpKillAsianEnd    = 200;
+
+// === Risk limits ===
+input double InpDailyLossPct = 2.0;
+input bool   InpCorrelationFilter = true;
+input double InpAtrMinPips   = 2.0;
 
 // runtime overrides (config file)
 string   gSymbols;
@@ -42,6 +71,7 @@ double   gMinScore;
 double   gMaxSpread;
 int      gCooldown;
 int      gMinSL;
+int      gMaxSL;
 int      gTimeStop;
 int      gBE;
 bool     gTrail;
@@ -52,6 +82,26 @@ bool     gTrackExecution;
 int      gSnapIntervalSec;
 bool     gTrackBridgeCloses;
 int      gLogClosedEvery;
+bool     gScalpMode;
+double   gWTickImb;
+double   gWSpreadComp;
+double   gWQuoteVel;
+double   gWMicroPull;
+double   gWCrossSync;
+double   gWEntropy;
+int      gMinAgreeing;
+bool     gKillLondon;
+int      gKillLondonStart;
+int      gKillLondonEnd;
+bool     gKillNY;
+int      gKillNYStart;
+int      gKillNYEnd;
+bool     gKillAsian;
+int      gKillAsianStart;
+int      gKillAsianEnd;
+double   gDailyLossPct;
+bool     gCorrelationFilter;
+double   gAtrMinPips;
 
 //+------------------------------------------------------------------+
 //| Execution tracking structs                                       |
@@ -72,7 +122,6 @@ struct ExecutionTrack {
    double   slippage;
    string   closeReason;
 };
-
 ExecutionTrack execHistory[];
 int execCount = 0;
 
@@ -95,7 +144,6 @@ struct ClosedTrade {
    ulong    ticket;
    string   closeReason;
 };
-
 ClosedTrade closedTrades[];
 int closedCount = 0;
 
@@ -104,6 +152,33 @@ int closedCount = 0;
 //+------------------------------------------------------------------+
 ulong    openTickets[];
 int      lastClosedTicket = 0;
+
+//+------------------------------------------------------------------+
+//| Tick data structures                                             |
+//+------------------------------------------------------------------+
+#define MAX_TICK_BUF 100
+
+struct TickSample {
+   double bid;
+   double ask;
+   datetime time;
+   long   volume;
+};
+
+struct SymbolState {
+   TickSample ticks[MAX_TICK_BUF];
+   int tickHead;
+   int tickCount;
+   double spreadHistory[20];
+   int spreadHead;
+   int spreadCount;
+   double lastSpread;
+   datetime lastTickTime;
+   int ticksPerSecond;
+   double lastVelocity;
+   datetime lastImpulseTime;
+   int impulseDir; // 1=buy, -1=sell, 0=none
+};
 
 //+------------------------------------------------------------------+
 //| 1s kline structs                                                 |
@@ -144,12 +219,26 @@ CAccountInfo   acc;
 string   syms[];
 int      symCount;
 TickState ts[];
+SymbolState symSt[];
 
 datetime lastScanTime;
-int      timerMs = 200;
-int      scanIntervalMs = 1000;
+int      timerMs = 50;
+int      scanIntervalMs = 200;
 int      tickCount = 0;
 int      snapCounter = 0;
+double   dailyNetProfit = 0;
+datetime lastTradeTime = 0;
+
+//+------------------------------------------------------------------+
+//| Correlation groups                                               |
+//+------------------------------------------------------------------+
+string corrGroups[][3] = {
+   {"EURUSD","GBPUSD","USDCHF"},
+   {"EURUSD","EURGBP","EURJPY"},
+   {"GBPUSD","EURGBP","GBPJPY"},
+   {"USDJPY","AUDUSD","NZDUSD"},
+   {"XAUUSD","XAGUSD","US30"}
+};
 
 //+------------------------------------------------------------------+
 //| Config file parser                                                |
@@ -169,13 +258,19 @@ void Trim(string &s) {
 void ReadConfig() {
    gSymbols = InpSymbols; gRiskPct = InpRiskPercent; gMaxOpen = InpMaxOpen; gMagic = (long)InpMagic;
    gMinScore = InpMinScore; gMaxSpread = InpMaxSpread;
-   gCooldown = InpCooldownSec; gMinSL = InpMinSLPips; gTimeStop = InpTimeStopMin;
-   gBE = InpBreakevenPips; gTrail = InpTrail; gTrailPips = InpTrailPips; gLogEvery = InpLogEvery;
-   gTargetProfit = InpTargetProfit;
-   gTrackExecution = InpTrackExecution;
-   gSnapIntervalSec = InpSnapIntervalSec;
-   gTrackBridgeCloses = InpTrackBridgeCloses;
+   gCooldown = InpCooldownSec; gMinSL = InpMinSLPips; gMaxSL = InpMaxSLPips;
+   gTimeStop = InpTimeStopSec; gBE = InpBreakevenPips; gTrail = InpTrail; gTrailPips = InpTrailPips;
+   gLogEvery = InpLogEvery; gTargetProfit = InpTargetProfit; gTrackExecution = InpTrackExecution;
+   gSnapIntervalSec = InpSnapIntervalSec; gTrackBridgeCloses = InpTrackBridgeCloses;
    gLogClosedEvery = InpLogClosedEvery;
+   gScalpMode = InpScalpMode;
+   gWTickImb = InpWTickImb; gWSpreadComp = InpWSpreadComp; gWQuoteVel = InpWQuoteVel;
+   gWMicroPull = InpWMicroPull; gWCrossSync = InpWCrossSync; gWEntropy = InpWEntropy;
+   gMinAgreeing = InpMinAgreeing;
+   gKillLondon = InpKillLondon; gKillLondonStart = InpKillLondonStart; gKillLondonEnd = InpKillLondonEnd;
+   gKillNY = InpKillNY; gKillNYStart = InpKillNYStart; gKillNYEnd = InpKillNYEnd;
+   gKillAsian = InpKillAsian; gKillAsianStart = InpKillAsianStart; gKillAsianEnd = InpKillAsianEnd;
+   gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips;
 
    int h = FileOpen(CONFIG_FILE, FILE_TXT|FILE_READ|FILE_ANSI);
    if (h == INVALID_HANDLE) {
@@ -204,7 +299,8 @@ void ReadConfig() {
       else if (key == "MAX_SPREAD") gMaxSpread = StringToDouble(val);
       else if (key == "COOLDOWN_SEC") gCooldown = (int)StringToInteger(val);
       else if (key == "MIN_SL_PIPS") gMinSL = (int)StringToInteger(val);
-      else if (key == "TIME_STOP_MIN") gTimeStop = (int)StringToInteger(val);
+      else if (key == "MAX_SL_PIPS") gMaxSL = (int)StringToInteger(val);
+      else if (key == "TIME_STOP_SEC") gTimeStop = (int)StringToInteger(val);
       else if (key == "BREAKEVEN_PIPS") gBE = (int)StringToInteger(val);
       else if (key == "TRAIL") gTrail = (StringToInteger(val) != 0);
       else if (key == "TRAIL_PIPS") gTrailPips = (int)StringToInteger(val);
@@ -214,6 +310,26 @@ void ReadConfig() {
       else if (key == "SNAP_INTERVAL_SEC") gSnapIntervalSec = (int)StringToInteger(val);
       else if (key == "TRACK_BRIDGE_CLOSES") gTrackBridgeCloses = (StringToInteger(val) != 0);
       else if (key == "LOG_CLOSED_EVERY") gLogClosedEvery = (int)StringToInteger(val);
+      else if (key == "SCALP_MODE") gScalpMode = (StringToInteger(val) != 0);
+      else if (key == "W_TICK_IMB") gWTickImb = StringToDouble(val);
+      else if (key == "W_SPREAD_COMP") gWSpreadComp = StringToDouble(val);
+      else if (key == "W_QUOTE_VEL") gWQuoteVel = StringToDouble(val);
+      else if (key == "W_MICRO_PULL") gWMicroPull = StringToDouble(val);
+      else if (key == "W_CROSS_SYNC") gWCrossSync = StringToDouble(val);
+      else if (key == "W_ENTROPY") gWEntropy = StringToDouble(val);
+      else if (key == "MIN_AGREEING") gMinAgreeing = (int)StringToInteger(val);
+      else if (key == "KILL_LONDON") gKillLondon = (StringToInteger(val) != 0);
+      else if (key == "KILL_LONDON_START") gKillLondonStart = (int)StringToInteger(val);
+      else if (key == "KILL_LONDON_END") gKillLondonEnd = (int)StringToInteger(val);
+      else if (key == "KILL_NY") gKillNY = (StringToInteger(val) != 0);
+      else if (key == "KILL_NY_START") gKillNYStart = (int)StringToInteger(val);
+      else if (key == "KILL_NY_END") gKillNYEnd = (int)StringToInteger(val);
+      else if (key == "KILL_ASIAN") gKillAsian = (StringToInteger(val) != 0);
+      else if (key == "KILL_ASIAN_START") gKillAsianStart = (int)StringToInteger(val);
+      else if (key == "KILL_ASIAN_END") gKillAsianEnd = (int)StringToInteger(val);
+      else if (key == "DAILY_LOSS_PCT") gDailyLossPct = StringToDouble(val);
+      else if (key == "CORRELATION_FILTER") gCorrelationFilter = (StringToInteger(val) != 0);
+      else if (key == "ATR_MIN_PIPS") gAtrMinPips = StringToDouble(val);
       else Print("Unknown config key: ", key);
    }
    FileClose(h);
@@ -228,20 +344,25 @@ int OnInit() {
    symCount = n;
    ArrayResize(syms, n);
    ArrayResize(ts, n);
+   ArrayResize(symSt, n);
    for (int i = 0; i < n; i++) {
       syms[i] = parts[i];
       ts[i].symbol = parts[i];
-      ts[i].head = 0;
-      ts[i].count = 0;
-      ts[i].curSec = 0;
-      ts[i].ticking = false;
-      ts[i].lastSignalTime = 0;
+      ts[i].head = 0; ts[i].count = 0; ts[i].curSec = 0;
+      ts[i].ticking = false; ts[i].lastSignalTime = 0;
+      symSt[i].tickHead = 0; symSt[i].tickCount = 0;
+      symSt[i].spreadHead = 0; symSt[i].spreadCount = 0;
+      symSt[i].lastSpread = 0; symSt[i].lastTickTime = 0;
+      symSt[i].ticksPerSecond = 0; symSt[i].lastVelocity = 0;
+      symSt[i].lastImpulseTime = 0; symSt[i].impulseDir = 0;
    }
    EventSetMillisecondTimer(timerMs);
-   Print("v9-mt5-bot v2.10 ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
-   Print("Target profit: $", gTargetProfit, " | Execution tracking: ", (gTrackExecution ? "ON" : "OFF"));
-   Print("Snap interval: ", gSnapIntervalSec, "s | Bridge close tracking: ", (gTrackBridgeCloses ? "ON" : "OFF"));
-   Comment("v9-mt5-bot v2.10 INIT\n", n, " symbols | target: $", gTargetProfit, "/trade");
+   Print("v9-mt5-bot v3.00 SCALPING ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
+   Print("Mode: ", (gScalpMode ? "SCALP" : "NORMAL"), " | Risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, " pips");
+   Print("Hybrid: TICK_IMB=", DoubleToString(gWTickImb,2), " SPREAD_COMP=", DoubleToString(gWSpreadComp,2),
+         " QUOTE_VEL=", DoubleToString(gWQuoteVel,2), " MICRO_PULL=", DoubleToString(gWMicroPull,2),
+         " CROSS_SYNC=", DoubleToString(gWCrossSync,2), " ENTROPY=", DoubleToString(gWEntropy,2));
+   Comment("v9-mt5-bot v3.00 SCALP\n", n, " symbols | risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, "p");
    return INIT_SUCCEEDED;
 }
 
@@ -249,16 +370,271 @@ int OnInit() {
 void OnDeinit(const int r) {
    Comment("");
    EventKillTimer();
-   Print("v9-mt5-bot v2.10 stopped (reason=", r, ")");
+   Print("v9-mt5-bot v3.00 stopped (reason=", r, ")");
    if (closedCount > 0)
       Print("Session summary: ", closedCount, " closed trades, total net profit: ", calcTotalNetProfit());
 }
 
 //+------------------------------------------------------------------+
-//| OnTrade: detect server-side closes (SL/TP/manual)                |
-//+------------------------------------------------------------------+
 void OnTrade() {
    detectClosedPositions();
+}
+
+//+------------------------------------------------------------------+
+//| Tick data ingestion                                              |
+//+------------------------------------------------------------------+
+void feedTickData(int s) {
+   MqlTick tick;
+   if (!SymbolInfoTick(syms[s], tick)) return;
+
+   int idx = symSt[s].tickHead % MAX_TICK_BUF;
+   symSt[s].ticks[idx].bid = tick.bid;
+   symSt[s].ticks[idx].ask = tick.ask;
+   symSt[s].ticks[idx].time = tick.time;
+   symSt[s].ticks[idx].volume = tick.volume;
+   symSt[s].tickHead++;
+   if (symSt[s].tickCount < MAX_TICK_BUF) symSt[s].tickCount++;
+
+   double spread = (tick.ask - tick.bid) / SymbolInfoDouble(syms[s], SYMBOL_POINT);
+   if (spread > 0 && spread < 100) {
+      int sidx = symSt[s].spreadHead % 20;
+      symSt[s].spreadHistory[sidx] = spread;
+      symSt[s].spreadHead++;
+      if (symSt[s].spreadCount < 20) symSt[s].spreadCount++;
+      symSt[s].lastSpread = spread;
+   }
+
+   datetime now = TimeCurrent();
+   if (symSt[s].lastTickTime > 0) {
+      int delta = (int)(now - symSt[s].lastTickTime);
+      if (delta > 0) symSt[s].lastVelocity = 1.0 / delta;
+   }
+   symSt[s].lastTickTime = now;
+
+   if (symSt[s].tickCount >= 3) {
+      int t1 = (symSt[s].tickHead - 3 + MAX_TICK_BUF) % MAX_TICK_BUF;
+      int t2 = (symSt[s].tickHead - 2 + MAX_TICK_BUF) % MAX_TICK_BUF;
+      int t3 = (symSt[s].tickHead - 1 + MAX_TICK_BUF) % MAX_TICK_BUF;
+      bool up1 = symSt[s].ticks[t1].bid < symSt[s].ticks[t2].bid;
+      bool up2 = symSt[s].ticks[t2].bid < symSt[s].ticks[t3].bid;
+      bool down1 = symSt[s].ticks[t1].bid > symSt[s].ticks[t2].bid;
+      bool down2 = symSt[s].ticks[t2].bid > symSt[s].ticks[t3].bid;
+      if (up1 && up2) { symSt[s].impulseDir = 1; symSt[s].lastImpulseTime = now; }
+      else if (down1 && down2) { symSt[s].impulseDir = -1; symSt[s].lastImpulseTime = now; }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Tick-based detectors                                             |
+//+------------------------------------------------------------------+
+double calcTickImbalance(int s) {
+   if (symSt[s].tickCount < 20) return 0;
+   int up = 0, down = 0;
+   for (int i = 0; i < 20; i++) {
+      if (i >= symSt[s].tickCount) break;
+      int idx = (symSt[s].tickHead - 1 - i + MAX_TICK_BUF) % MAX_TICK_BUF;
+      if (i == 0) continue;
+      int prev = (symSt[s].tickHead - 1 - (i-1) + MAX_TICK_BUF) % MAX_TICK_BUF;
+      if (symSt[s].ticks[idx].bid > symSt[s].ticks[prev].bid) up++;
+      else if (symSt[s].ticks[idx].bid < symSt[s].ticks[prev].bid) down++;
+   }
+   int total = up + down;
+   if (total < 15) return 0;
+   double ratio = (double)MathMax(up, down) / total;
+   if (ratio >= 0.70) return ratio;
+   return 0;
+}
+
+double calcSpreadCompression(int s) {
+   if (symSt[s].spreadCount < 5) return 0;
+   double cur = symSt[s].spreadHistory[(symSt[s].spreadHead - 1 + 20) % 20];
+   double old = symSt[s].spreadHistory[(symSt[s].spreadHead - 4 + 20) % 20];
+   if (old <= 0) return 0;
+   double compression = (old - cur) / old;
+   if (compression >= 0.30 && cur < 3.0) return compression;
+   return 0;
+}
+
+double calcQuoteVelocity(int s) {
+   if (symSt[s].tickCount < 30) return 0;
+   if (symSt[s].lastVelocity > 0 && symSt[s].lastVelocity > 2.0) return 1.0;
+   return 0;
+}
+
+double calcMicroPullback(int s) {
+   if (symSt[s].impulseDir == 0) return 0;
+   datetime now = TimeCurrent();
+   if (now - symSt[s].lastImpulseTime > 5) return 0;
+   if (symSt[s].tickCount < 3) return 0;
+   int last = (symSt[s].tickHead - 1 + MAX_TICK_BUF) % MAX_TICK_BUF;
+   int prev = (symSt[s].tickHead - 2 + MAX_TICK_BUF) % MAX_TICK_BUF;
+   bool reverse = (symSt[s].impulseDir == 1 && symSt[s].ticks[last].bid < symSt[s].ticks[prev].bid) ||
+                  (symSt[s].impulseDir == -1 && symSt[s].ticks[last].bid > symSt[s].ticks[prev].bid);
+   if (reverse) return 0.8;
+   return 0;
+}
+
+double calcCrossSync(int s) {
+   string sym = syms[s];
+   int agrees = 0;
+   int total = 0;
+   for (int g = 0; g < ArraySize(corrGroups); g++) {
+      bool found = false;
+      for (int m = 0; m < 3; m++) {
+         if (corrGroups[g][m] == sym) { found = true; break; }
+      }
+      if (!found) continue;
+      for (int m = 0; m < 3; m++) {
+         if (corrGroups[g][m] == sym) continue;
+         int otherIdx = -1;
+         for (int k = 0; k < symCount; k++) {
+            if (syms[k] == corrGroups[g][m]) { otherIdx = k; break; }
+         }
+         if (otherIdx < 0) continue;
+         total++;
+         if (symSt[s].impulseDir != 0 && symSt[otherIdx].impulseDir != 0 &&
+             symSt[s].impulseDir == symSt[otherIdx].impulseDir) {
+            agrees++;
+         }
+      }
+   }
+   if (total >= 2 && agrees >= 2) return 1.0;
+   return 0;
+}
+
+double calcTickEntropy(int s) {
+   if (symSt[s].tickCount < 20) return 0;
+   int up = 0, down = 0, flat = 0;
+   for (int i = 0; i < 20; i++) {
+      if (i >= symSt[s].tickCount) break;
+      int idx = (symSt[s].tickHead - 1 - i + MAX_TICK_BUF) % MAX_TICK_BUF;
+      if (i == 0) continue;
+      int prev = (symSt[s].tickHead - 1 - (i-1) + MAX_TICK_BUF) % MAX_TICK_BUF;
+      if (symSt[s].ticks[idx].bid > symSt[s].ticks[prev].bid) up++;
+      else if (symSt[s].ticks[idx].bid < symSt[s].ticks[prev].bid) down++;
+      else flat++;
+   }
+   int total = up + down + flat;
+   if (total < 15) return 0;
+   double pUp = (double)up / total;
+   double pDown = (double)down / total;
+   double pFlat = (double)flat / total;
+   double entropy = 0;
+   if (pUp > 0) entropy -= pUp * MathLog(pUp) / MathLog(2);
+   if (pDown > 0) entropy -= pDown * MathLog(pDown) / MathLog(2);
+   if (pFlat > 0) entropy -= pFlat * MathLog(pFlat) / MathLog(2);
+   if (entropy < 0.5) return 1.0 - entropy * 2.0;
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Session and risk filters                                         |
+//+------------------------------------------------------------------+
+bool isKillZoneActive() {
+   if (!gScalpMode) return true;
+   datetime now = TimeCurrent();
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   int gmtMinutes = dt.hour * 60 + dt.min;
+   if (gKillLondon && gmtMinutes >= gKillLondonStart && gmtMinutes <= gKillLondonEnd) return true;
+   if (gKillNY && gmtMinutes >= gKillNYStart && gmtMinutes <= gKillNYEnd) return true;
+   if (gKillAsian) {
+      if (gKillAsianStart > gKillAsianEnd) {
+         if (gmtMinutes >= gKillAsianStart || gmtMinutes <= gKillAsianEnd) return true;
+      } else {
+         if (gmtMinutes >= gKillAsianStart && gmtMinutes <= gKillAsianEnd) return true;
+      }
+   }
+   return false;
+}
+
+bool isDailyLossLimitHit() {
+   if (!gScalpMode) return false;
+   double limit = acc.Balance() * gDailyLossPct / 100.0;
+   return (dailyNetProfit < -limit);
+}
+
+bool hasCorrelatedOpen(string sym) {
+   if (!gCorrelationFilter || !gScalpMode) return false;
+   for (int g = 0; g < ArraySize(corrGroups); g++) {
+      bool symInGroup = false;
+      int otherCount = 0;
+      for (int m = 0; m < 3; m++) {
+         if (corrGroups[g][m] == sym) symInGroup = true;
+         else {
+            for (int k = 0; k < symCount; k++) {
+               if (syms[k] == corrGroups[g][m] && hasPos(syms[k])) otherCount++;
+            }
+         }
+      }
+      if (symInGroup && otherCount > 0) return true;
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Hybrid signal scoring                                            |
+//+------------------------------------------------------------------+
+struct HybridSignal {
+   string name;
+   double score;
+   int    side;
+};
+
+bool getHybridSignal(int s, HybridSignal &out) {
+   if (!gScalpMode) return false;
+   double imb = calcTickImbalance(s);
+   double spreadComp = calcSpreadCompression(s);
+   double vel = calcQuoteVelocity(s);
+   double pull = calcMicroPullback(s);
+   double sync = calcCrossSync(s);
+   double entropy = calcTickEntropy(s);
+
+   int agreeing = 0;
+   int side = 0;
+
+   if (imb > 0) {
+      agreeing++;
+      int lastIdx = (symSt[s].tickHead - 1 + MAX_TICK_BUF) % MAX_TICK_BUF;
+      int prevIdx = (symSt[s].tickHead - 2 + MAX_TICK_BUF) % MAX_TICK_BUF;
+      side = (symSt[s].ticks[lastIdx].bid > symSt[s].ticks[prevIdx].bid) ? 1 : -1;
+   }
+   if (spreadComp > 0) {
+      agreeing++;
+      int scSide = (symSt[s].ticks[(symSt[s].tickHead - 1 + MAX_TICK_BUF) % MAX_TICK_BUF].bid >
+                    symSt[s].ticks[(symSt[s].tickHead - 4 + MAX_TICK_BUF) % MAX_TICK_BUF].bid) ? 1 : -1;
+      if (side == 0) side = scSide; else if (side != scSide) agreeing--;
+   }
+   if (vel > 0) {
+      agreeing++;
+      int vSide = (symSt[s].ticks[(symSt[s].tickHead - 1 + MAX_TICK_BUF) % MAX_TICK_BUF].bid >
+                   symSt[s].ticks[(symSt[s].tickHead - 2 + MAX_TICK_BUF) % MAX_TICK_BUF].bid) ? 1 : -1;
+      if (side == 0) side = vSide; else if (side != vSide) agreeing--;
+   }
+   if (pull > 0) {
+      agreeing++;
+      int pSide = (symSt[s].impulseDir == 1) ? 1 : -1;
+      if (side == 0) side = pSide; else if (side != pSide) agreeing--;
+   }
+   if (sync > 0) {
+      agreeing++;
+      if (side == 0) side = (symSt[s].impulseDir != 0) ? symSt[s].impulseDir : 1;
+   }
+   if (entropy > 0) {
+      agreeing++;
+      int eSide = (symSt[s].impulseDir != 0) ? symSt[s].impulseDir : 1;
+      if (side == 0) side = eSide; else if (side != eSide) agreeing--;
+   }
+
+   if (agreeing < gMinAgreeing || side == 0) return false;
+
+   double composite = gWTickImb * imb + gWSpreadComp * spreadComp + gWQuoteVel * vel + gWMicroPull * pull + gWCrossSync * sync + gWEntropy * entropy;
+   if (composite < gMinScore) return false;
+
+   out.name = "HYBRID_SCALP";
+   out.score = composite;
+   out.side = side;
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -267,8 +643,7 @@ void OnTrade() {
 void snapshotOpenPositions() {
    int count = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic)
-         count++;
+      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) count++;
    }
    ArrayResize(openTickets, count);
    count = 0;
@@ -282,19 +657,15 @@ void snapshotOpenPositions() {
 
 void detectClosedPositions() {
    if (closedCount % gLogClosedEvery != 0 && closedCount > 0) return;
-
    datetime from = TimeCurrent() - 600;
    datetime to = TimeCurrent();
    if (!HistorySelect(from, to)) return;
-
    for (int j = HistoryDealsTotal() - 1; j >= 0; j--) {
       ulong dealTicket = HistoryDealGetTicket(j);
       if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != (int)gMagic) continue;
       if (HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-
       ulong ticket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_TICKET);
       if (ticket == lastClosedTicket) continue;
-
       string sym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
       ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
       string typeStr = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
@@ -304,11 +675,8 @@ void detectClosedPositions() {
       double net = profit + comm + swap;
       datetime closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
       double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-
-      if (closedCount >= ArraySize(closedTrades))
-         ArrayResize(closedTrades, closedCount + 100);
-
-      closedTrades[closedCount].openTime = closeTime - 3600;
+      if (closedCount >= ArraySize(closedTrades)) ArrayResize(closedTrades, closedCount + 100);
+      closedTrades[closedCount].openTime = closeTime - 60;
       closedTrades[closedCount].closeTime = closeTime;
       closedTrades[closedCount].symbol = sym;
       closedTrades[closedCount].type = typeStr;
@@ -323,16 +691,12 @@ void detectClosedPositions() {
       closedTrades[closedCount].ticket = ticket;
       closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
       closedCount++;
-
       lastClosedTicket = ticket;
-
-      Print("CLOSED: ", sym, " | ", typeStr,
-            " | Profit: ", DoubleToString(profit, 2),
-            " | Comm: ", DoubleToString(comm, 2),
-            " | Swap: ", DoubleToString(swap, 2),
-            " | NET: ", DoubleToString(net, 2),
-            " | Reason: ", closedTrades[closedCount-1].closeReason,
-            " | Ticket: ", ticket);
+      dailyNetProfit += net;
+      Print("CLOSED: ", sym, " | ", typeStr, " | Profit: ", DoubleToString(profit, 2),
+            " | Comm: ", DoubleToString(comm, 2), " | Swap: ", DoubleToString(swap, 2),
+            " | NET: ", DoubleToString(net, 2), " | Reason: ", closedTrades[closedCount-1].closeReason,
+            " | Ticket: ", ticket, " | Daily PnL: ", DoubleToString(dailyNetProfit, 2));
    }
 }
 
@@ -341,44 +705,41 @@ string detectCloseReason(string sym, double closePrice, ENUM_DEAL_TYPE dealType)
       if (!pos.SelectByIndex(i)) continue;
       if (pos.Magic() != (int)gMagic) continue;
       if (pos.Symbol() != sym) continue;
-
       double sl = pos.StopLoss();
       double tp = pos.TakeProfit();
       double open = pos.PriceOpen();
       double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-
       if (sl > 0 && MathAbs(closePrice - sl) < 3 * pt) return "SL_HIT";
       if (tp > 0 && MathAbs(closePrice - tp) < 3 * pt) return "TP_HIT";
       if (gBE > 0 && MathAbs(closePrice - open) < 3 * pt) return "BREAKEVEN";
-      if (gTimeStop > 0 && (TimeCurrent() - pos.Time()) >= gTimeStop * 60) return "TIME_STOP";
+      if (gTimeStop > 0 && (TimeCurrent() - pos.Time()) >= gTimeStop) return "TIME_STOP";
    }
    return "MANUAL_OR_OTHER";
 }
 
 double calcTotalNetProfit() {
    double total = 0;
-   for (int i = 0; i < closedCount; i++)
-      total += closedTrades[i].netProfit;
+   for (int i = 0; i < closedCount; i++) total += closedTrades[i].netProfit;
    return total;
 }
 
 //+------------------------------------------------------------------+
-//| Timer: main loop every 200ms                                     |
+//| Timer: main loop every 50ms                                      |
 //+------------------------------------------------------------------+
 void OnTimer() {
    tickCount++;
 
    // 1. feed ticks for all symbols
    for (int s = 0; s < symCount; s++)
-      feedTick(s);
+      feedTickData(s);
 
-   // 2. finalize completed seconds
+   // 2. finalize completed seconds (legacy 1s klines)
    finalizeSecs();
 
    // 3. manage open positions (trail, breakeven, time stop)
    managePositions();
 
-   // 4. scan for signals (once per second)
+   // 4. scan for signals (every 200ms)
    if (GetTickCount() - lastScanTime >= scanIntervalMs) {
       lastScanTime = GetTickCount();
       scanSymbols();
@@ -402,11 +763,8 @@ void OnTimer() {
 void feedTick(int s) {
    MqlTick tick;
    if (!SymbolInfoTick(syms[s], tick)) return;
-
    int secStart = (int)(tick.time);
-
    if (secStart != ts[s].curSec) {
-      // finalize previous second if active
       if (ts[s].ticking) {
          int idx = ts[s].head % MAX_SEC_BARS;
          ts[s].bars[idx].time   = (datetime)ts[s].curSec;
@@ -418,7 +776,6 @@ void feedTick(int s) {
          ts[s].head = (ts[s].head + 1) % MAX_SEC_BARS;
          if (ts[s].count < MAX_SEC_BARS) ts[s].count++;
       }
-      // start new second
       ts[s].curSec   = secStart;
       ts[s].curOpen  = (tick.bid != 0 ? tick.bid : tick.ask);
       ts[s].curHigh  = ts[s].curOpen;
@@ -427,7 +784,6 @@ void feedTick(int s) {
       ts[s].curVol   = 1;
       ts[s].ticking  = true;
    } else {
-      // update current second
       double price = (tick.bid != 0 ? tick.bid : tick.ask);
       ts[s].curHigh  = MathMax(ts[s].curHigh, price);
       ts[s].curLow   = MathMin(ts[s].curLow, price);
@@ -436,14 +792,10 @@ void feedTick(int s) {
    }
 }
 
-//+------------------------------------------------------------------+
-//| Finalize any bars where the second has elapsed (catch-up)        |
-//+------------------------------------------------------------------+
 void finalizeSecs() {
    int nowSec = (int)TimeCurrent();
    for (int s = 0; s < symCount; s++) {
       while (ts[s].ticking && ts[s].curSec < nowSec) {
-         // finalize the completed second
          int idx = ts[s].head % MAX_SEC_BARS;
          ts[s].bars[idx].time   = (datetime)ts[s].curSec;
          ts[s].bars[idx].open   = ts[s].curOpen;
@@ -453,21 +805,16 @@ void finalizeSecs() {
          ts[s].bars[idx].volume = ts[s].curVol;
          ts[s].head = (ts[s].head + 1) % MAX_SEC_BARS;
          if (ts[s].count < MAX_SEC_BARS) ts[s].count++;
-
-         // start next second (carry close as open)
          ts[s].curSec++;
          ts[s].curOpen  = ts[s].curClose;
          ts[s].curHigh  = ts[s].curClose;
          ts[s].curLow   = ts[s].curClose;
          ts[s].curVol   = 0;
-         ts[s].ticking  = false; // no tick yet in this new second
+         ts[s].ticking  = false;
       }
    }
 }
 
-//+------------------------------------------------------------------+
-//| Convert 1s kline circular buffer to linear MqlRates[]            |
-//+------------------------------------------------------------------+
 int get1sRates(int s, MqlRates &out[], int maxCount) {
    int have = MathMin(ts[s].count, maxCount);
    if (have < 2) return 0;
@@ -486,9 +833,6 @@ int get1sRates(int s, MqlRates &out[], int maxCount) {
    return have;
 }
 
-//+------------------------------------------------------------------+
-//| Get rates from multiple timeframes                               |
-//+------------------------------------------------------------------+
 bool getMtfRates(string sym, ENUM_TIMEFRAMES tf1, ENUM_TIMEFRAMES tf2, ENUM_TIMEFRAMES tf3,
                  MqlRates &r1[], MqlRates &r2[], MqlRates &r3[], int &got1, int &got2, int &got3) {
    got1 = CopyRates(sym, tf1, 1, 100, r1);
@@ -498,31 +842,26 @@ bool getMtfRates(string sym, ENUM_TIMEFRAMES tf1, ENUM_TIMEFRAMES tf2, ENUM_TIME
 }
 
 //+------------------------------------------------------------------+
-//| Manage open positions: trail, breakeven, time stop               |
+//| Manage open positions                                            |
 //+------------------------------------------------------------------+
 void managePositions() {
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
       if (!pos.SelectByIndex(i)) continue;
       if (pos.Magic() != (int)gMagic) continue;
-
-      // time stop
       if (gTimeStop > 0) {
          datetime age = TimeCurrent() - pos.Time();
-         if (age >= gTimeStop * 60) {
-            Print(pos.Symbol(), " | TIME STOP — age=", age / 60, "min, closing ticket=", pos.Ticket());
+         if (age >= gTimeStop) {
+            Print(pos.Symbol(), " | TIME STOP — age=", age, "s, closing ticket=", pos.Ticket());
             trade.PositionClose(pos.Ticket());
             continue;
          }
       }
-
-      // breakeven
       if (gBE > 0) {
          double open  = pos.PriceOpen();
          double curr  = pos.PriceCurrent();
          double sl    = pos.StopLoss();
          double pt    = SymbolInfoDouble(pos.Symbol(), SYMBOL_POINT);
          double bePts = gBE * 10 * pt;
-
          if (pos.PositionType() == POSITION_TYPE_BUY) {
             if (curr - open >= bePts && (sl == 0 || sl < open)) {
                trade.PositionModify(pos.Ticket(), open, pos.TakeProfit());
@@ -535,8 +874,6 @@ void managePositions() {
             }
          }
       }
-
-      // trailing stop
       if (gTrail) doTrail(i);
    }
 }
@@ -545,50 +882,130 @@ void managePositions() {
 //| Scan all symbols for trade signals                                |
 //+------------------------------------------------------------------+
 void scanSymbols() {
-   int openCount = 0;
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic)
-         openCount++;
+   if (!isKillZoneActive()) return;
+   if (isDailyLossLimitHit()) {
+      if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
+      return;
    }
 
-   int placed = 0, skippedPos = 0, skippedCool = 0, skippedData = 0, skippedSpread = 0, noSig = 0;
+   int openCount = 0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) openCount++;
+   }
+
+   int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
 
    for (int s = 0; s < symCount; s++) {
       if (openCount + placed >= gMaxOpen) break;
       if (hasPos(syms[s])) { skippedPos++; continue; }
       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
+      if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
-      MqlRates r1[], r3[], r15[];
-      int got1, got3, got15;
-      if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M3, PERIOD_M15, r1, r3, r15, got1, got3, got15)) {
-         skippedData++; continue;
+      MqlRates r1[], r5[], r15[];
+      int got1, got5, got15;
+      if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
+         noSig++; continue;
       }
 
       double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
-      if (sp > gMaxSpread) { skippedSpread++; continue; }
+      if (sp > gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)) { skippedSpread++; continue; }
 
-      double rsiVal = calcRsi(r15, got15, 14);
-      Signal sig;
-      if (getSignal(r1, r3, r15, got1, got3, got15, sig) && sig.score >= gMinScore) {
+      double atr = calcAtr(r1, got1, 14);
+      double minAtr = gAtrMinPips * 10 * SymbolInfoDouble(syms[s], SYMBOL_POINT);
+      if (atr < minAtr) { noSig++; continue; }
+
+      HybridSignal sig;
+      if (getHybridSignal(s, sig)) {
          if (tickCount % gLogEvery == 0)
-            Print(">>> ", syms[s], " | SIGNAL: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
-                  " score=", sig.score, " rsi=", DoubleToString(rsiVal, 1));
-         if (execTrade(syms[s], sig)) {
+            Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
+                  " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
+                  " spreadComp=", DoubleToString(calcSpreadCompression(s), 2));
+         if (execScalpTrade(syms[s], sig)) {
             ts[s].lastSignalTime = TimeCurrent();
             placed++;
          }
       } else {
          noSig++;
-         if (tickCount % gLogEvery == 0)
-            Print(">>> ", syms[s], " | no signal (rsi=", DoubleToString(rsiVal, 1),
-                  " score=", (sig.score > 0 ? DoubleToString(sig.score, 2) : "0.00"), ")");
       }
    }
 
    if (tickCount % gLogEvery == 0)
       Print("=== SCAN | open=", openCount, " placed=", placed,
             " hasPos=", skippedPos, " cooldown=", skippedCool,
-            " noData=", skippedData, " spread=", skippedSpread, " noSig=", noSig);
+            " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig);
+}
+
+//+------------------------------------------------------------------+
+//| Scalp trade execution                                            |
+//+------------------------------------------------------------------+
+bool execScalpTrade(string sym, HybridSignal &sig) {
+   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   double price = (sig.side == 1) ? ask : bid;
+   double pt   = SymbolInfoDouble(sym, SYMBOL_POINT);
+   double minSL = gMinSL * 10 * pt;
+   double maxSL = gMaxSL * 10 * pt;
+
+   double slDist = MathMax(minSL, maxSL);
+   double lots = calcLotByRisk(sym, price, slDist, sig.side);
+   if (lots < SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN)) return false;
+
+   double sl = (sig.side == 1) ? price - slDist : price + slDist;
+   double tp = (sig.side == 1) ? price + slDist * 1.5 : price - slDist * 1.5;
+
+   ENUM_ORDER_TYPE type = (sig.side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   string typeStr = (sig.side == 1) ? "BUY" : "SELL";
+
+   trade.PositionOpen(sym, type, lots, price, sl, tp, "v9-" + sig.name);
+   bool ok = trade.ResultRetcode() == TRADE_RETCODE_DONE;
+
+   if (ok) {
+      double fillPrice = trade.ResultPrice();
+      double slippage = MathAbs(fillPrice - price);
+      Print(sym, " | SCALP ", typeStr, " ", sig.name, " score=", DoubleToString(sig.score, 2),
+            " lots=", lots, " req=", price, " fill=", fillPrice, " slip=", DoubleToString(slippage, 5),
+            " sl=", sl, " tp=", tp, " ticket=", trade.ResultOrder());
+      if (gTrackExecution) {
+         if (execCount >= ArraySize(execHistory)) ArrayResize(execHistory, execCount + 100);
+         execHistory[execCount].time = TimeCurrent();
+         execHistory[execCount].symbol = sym;
+         execHistory[execCount].type = typeStr;
+         execHistory[execCount].signalName = sig.name;
+         execHistory[execCount].requestedPrice = price;
+         execHistory[execCount].filledPrice = fillPrice;
+         execHistory[execCount].sl = sl;
+         execHistory[execCount].tp = tp;
+         execHistory[execCount].lots = lots;
+         execHistory[execCount].commission = 0;
+         execHistory[execCount].swap = 0;
+         execHistory[execCount].slippage = slippage;
+         execCount++;
+      }
+      lastTradeTime = TimeCurrent();
+   } else {
+      Print(sym, " | FAILED SCALP ", typeStr, " retcode=", trade.ResultRetcode(),
+            " comment=", trade.ResultComment());
+   }
+   return ok;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate lot size                                               |
+//+------------------------------------------------------------------+
+double calcLotByRisk(string sym, double entry, double slDist, int side) {
+   double maxRisk = acc.Balance() * (gRiskPct / 100.0);
+   double minV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   double maxV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   double slPrice = (side == 1) ? entry - slDist : entry + slDist;
+   int type = (side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double profit1 = 0;
+   if (!OrderCalcProfit((ENUM_ORDER_TYPE)type, sym, 1.0, entry, slPrice, profit1)) return minV;
+   if (profit1 >= 0) return minV;
+   double raw = maxRisk / MathAbs(profit1);
+   double lots = MathFloor(raw / step) * step;
+   lots = MathMax(minV, MathMin(lots, maxV));
+   return lots;
 }
 
 //+------------------------------------------------------------------+
@@ -713,261 +1130,6 @@ double calcAdx(const MqlRates &r[], int total, int p = 14) {
 }
 
 //+------------------------------------------------------------------+
-//| Signal structure                                                 |
-//+------------------------------------------------------------------+
-struct Signal {
-   string name;
-   double score;
-   double avgMove;
-   int    side;
-   double tp;
-   double sl;
-};
-
-//+------------------------------------------------------------------+
-//| Multi-timeframe signal detection                                 |
-//+------------------------------------------------------------------+
-bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[], int got1, int got3, int got15, Signal &out) {
-   if (got1 < 20 || got3 < 20 || got15 < 20) return false;
-
-   double rsi   = calcRsi(r15, got15, 14);
-   double rsi1  = calcRsi(r1, got1, 14);
-   double rsi3  = calcRsi(r3, got3, 14);
-   double ma10  = calcMa(r15, got15, 10);
-   double ma20  = calcMa(r15, got15, 20);
-   double ema9  = calcEma(r15, got15, 9);
-   double ema21 = calcEma(r15, got15, 21);
-   double ema50 = calcEma(r15, got15, 50);
-   double vr    = calcVolRatio(r15, got15, 20);
-   double atr   = calcAtr(r15, got15, 14);
-   double p     = r15[got15 - 1].close;
-   double dev   = ((p - ma10) / ma10) * 100;
-
-   bool tf1Bull = r1[got1-1].close > calcEma(r1, got1, 20);
-   bool tf3Bull = r3[got3-1].close > calcEma(r3, got3, 20);
-   bool tf15Bull = r15[got15-1].close > calcEma(r15, got15, 20);
-   bool trendUp = (tf1Bull && tf3Bull) || (tf1Bull && tf15Bull);
-   bool trendDn = (!tf1Bull && !tf3Bull) || (!tf1Bull && !tf15Bull);
-
-   double bbUp, bbDn, bbSma;
-   calcBb(r15, got15, bbUp, bbDn, bbSma, 20, 2);
-
-   double macdLine, signalLine, macdHist;
-   macdHist = calcMacd(r15, got15, 12, 26, 9, macdLine, signalLine);
-
-   double stochK, stochD, stochDiff;
-   stochDiff = calcStoch(r15, got15, 14, 3, stochK, stochD);
-
-   double adx = calcAdx(r15, got15, 14);
-
-   string names[25];
-   double scores[25];
-   int    sides[25];
-   double tpVals[25];
-   double slVals[25];
-   double avgMoves[25];
-   int sigN = 0;
-
-   double rsiPrev = calcRsi(r15, got15 - 1, 14);
-   double lastO = r15[got15 - 1].open, lastC = r15[got15 - 1].close;
-   bool green = lastC > lastO;
-
-   if (rsiPrev >= 30 && rsi < 30 && green && rsi3 < 40) {
-      names[sigN] = "RSI_OVERSOLD"; scores[sigN] = 0.88; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-   if (rsiPrev <= 70 && rsi > 70 && !green && rsi3 > 60) {
-      names[sigN] = "RSI_OVERBOUGHT"; scores[sigN] = 0.88; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-
-   if (dev < -2.5 && rsi < 40 && trendUp) {
-      names[sigN] = "MA10_BOUNCE"; scores[sigN] = 0.86; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-   if (dev > 2.5 && rsi > 60 && trendDn) {
-      names[sigN] = "MA10_REJECT"; scores[sigN] = 0.86; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-
-   double ema9Prev  = calcEma(r15, got15 - 1, 9);
-   double ema21Prev = calcEma(r15, got15 - 1, 21);
-   bool crossUp  = ema9Prev <= ema21Prev && ema9 > ema21;
-   bool crossDn  = ema9Prev >= ema21Prev && ema9 < ema21;
-   double ema21Slope = (ema21Prev > 0) ? (ema21 - ema21Prev) / ema21Prev : 0;
-
-   if (crossUp && vr > 2.0 && rsi < 65 && green && ema21Slope > -0.0005 && adx > 20) {
-      names[sigN] = "EMA_CROSS_UP"; scores[sigN] = 0.85; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-   if (crossDn && vr > 2.0 && rsi > 35 && adx > 20) {
-      names[sigN] = "EMA_CROSS_DN"; scores[sigN] = 0.85; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-
-   if (bbDn > 0 && p < bbDn * 1.002 && rsi < 35 && vr > 1.3 && ema50 > 0 && p > ema50 * 0.995 && macdHist > 0) {
-      names[sigN] = "BB_REV_LONG"; scores[sigN] = 0.87; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = bbSma; slVals[sigN] = bbDn * 0.997; sigN++;
-   }
-   if (bbUp > 0 && p > bbUp * 0.998 && rsi > 65 && vr > 1.3 && ema50 > 0 && p < ema50 * 1.005 && macdHist < 0) {
-      names[sigN] = "BB_REV_SHORT"; scores[sigN] = 0.87; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = bbSma; slVals[sigN] = bbUp * 1.003; sigN++;
-   }
-
-   if (ma10 > ma20 && dev < -1.5 && rsi < 50 && stochK < 30 && trendUp) {
-      names[sigN] = "TREND_LONG"; scores[sigN] = 0.84; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-   if (ma10 < ma20 && dev > 1.5 && rsi > 50 && stochK > 70 && trendDn) {
-      names[sigN] = "TREND_SHORT"; scores[sigN] = 0.84; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-
-   if (vr > 2.5 && p > ma10 && rsi < 60 && rsi1 < 65 && tf1Bull) {
-      names[sigN] = "VOL_BREAKUP"; scores[sigN] = 0.82; sides[sigN] = 1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-   if (vr > 2.5 && p < ma10 && rsi > 40 && rsi1 > 35 && !tf1Bull) {
-      names[sigN] = "VOL_BREAKDN"; scores[sigN] = 0.82; sides[sigN] = -1;
-      avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-   }
-
-   if (vr > 2.0 && got15 >= 3) {
-      int d1 = (r15[got15 - 3].close > r15[got15 - 3].open) ? 1 : -1;
-      int d2 = (r15[got15 - 2].close > r15[got15 - 2].open) ? 1 : -1;
-      int d3 = (r15[got15 - 1].close > r15[got15 - 1].open) ? 1 : -1;
-      if (d1 == d2 && d2 == d3) {
-         bool bull = (d3 == 1);
-         if (bull && p > ema50 && rsi < 60 && tf3Bull) {
-            names[sigN] = "MOMENTUM_LONG"; scores[sigN] = 0.83; sides[sigN] = 1;
-            avgMoves[sigN] = atr; tpVals[sigN] = p + atr * 1.5; slVals[sigN] = p - atr * 0.7; sigN++;
-         }
-         if (!bull && p < ema50 && rsi > 40 && !tf3Bull) {
-            names[sigN] = "MOMENTUM_SHORT"; scores[sigN] = 0.83; sides[sigN] = -1;
-            avgMoves[sigN] = atr; tpVals[sigN] = p - atr * 1.5; slVals[sigN] = p + atr * 0.7; sigN++;
-         }
-      }
-   }
-
-   if (vr < 0.5 && adx < 20) {
-      if (rsi < 35 && stochK < 20) {
-         names[sigN] = "SQUEEZE_LONG"; scores[sigN] = 0.80; sides[sigN] = 1;
-         avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-      }
-      if (rsi > 65 && stochK > 80) {
-         names[sigN] = "SQUEEZE_SHORT"; scores[sigN] = 0.80; sides[sigN] = -1;
-         avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
-      }
-   }
-
-   int best = -1;
-   double bestSc = 0;
-   for (int i = 0; i < sigN; i++) {
-      if (scores[i] >= 0.80 && scores[i] > bestSc) {
-         best = i;
-         bestSc = scores[i];
-      }
-   }
-
-   if (best < 0) return false;
-
-   out.name    = names[best];
-   out.score   = scores[best];
-   out.side    = sides[best];
-   out.avgMove = avgMoves[best];
-   out.tp      = tpVals[best];
-   out.sl      = slVals[best];
-   return true;
-}
-
-//+------------------------------------------------------------------+
-//| Trade execution with tracking                                    |
-//+------------------------------------------------------------------+
-bool execTrade(string sym, Signal &sig) {
-   double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(sym, SYMBOL_BID);
-   double price = (sig.side == 1) ? ask : bid;
-   double pt   = SymbolInfoDouble(sym, SYMBOL_POINT);
-   double minSL = gMinSL * 10 * pt;
-
-   double slDist = (sig.sl > 0) ? MathAbs(price - sig.sl) : MathMax(sig.avgMove, MathMax(minSL, pt * 200));
-   double lots = calcLotByRisk(sym, price, slDist, sig.side);
-   if (lots < SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN)) return false;
-
-   double sl = (sig.sl > 0) ? sig.sl : (sig.side == 1) ? price - slDist : price + slDist;
-   double tp = (sig.tp > 0) ? sig.tp : (sig.side == 1) ? price + slDist * 1.5 : price - slDist * 1.5;
-
-   double minProfitDist = (gTargetProfit + 5.0) / (lots * 100000.0 / SymbolInfoDouble(sym, SYMBOL_POINT));
-   if (sig.side == 1) {
-      tp = MathMax(tp, price + MathMax(slDist * 1.5, minProfitDist));
-   } else {
-      tp = MathMin(tp, price - MathMax(slDist * 1.5, minProfitDist));
-   }
-
-   ENUM_ORDER_TYPE type = (sig.side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   string typeStr = (sig.side == 1) ? "BUY" : "SELL";
-
-   trade.PositionOpen(sym, type, lots, price, sl, tp, "v9-" + sig.name);
-   bool ok = trade.ResultRetcode() == TRADE_RETCODE_DONE;
-
-   if (ok) {
-      double fillPrice = trade.ResultPrice();
-      double slippage = MathAbs(fillPrice - price);
-
-      Print(sym, " | ", typeStr, " ", sig.name, " score=", sig.score, " lots=", lots,
-            " req=", price, " fill=", fillPrice, " slip=", DoubleToString(slippage, 5),
-            " sl=", sl, " tp=", tp, " ticket=", trade.ResultOrder());
-
-      if (gTrackExecution) {
-         if (execCount >= ArraySize(execHistory))
-            ArrayResize(execHistory, execCount + 100);
-
-         execHistory[execCount].time = TimeCurrent();
-         execHistory[execCount].symbol = sym;
-         execHistory[execCount].type = typeStr;
-         execHistory[execCount].signalName = sig.name;
-         execHistory[execCount].requestedPrice = price;
-         execHistory[execCount].filledPrice = fillPrice;
-         execHistory[execCount].sl = sl;
-         execHistory[execCount].tp = tp;
-         execHistory[execCount].lots = lots;
-         execHistory[execCount].commission = 0;
-         execHistory[execCount].swap = 0;
-         execHistory[execCount].slippage = slippage;
-         execCount++;
-      }
-   } else {
-      Print(sym, " | FAILED ", typeStr, " ", sig.name, " retcode=", trade.ResultRetcode(),
-            " comment=", trade.ResultComment());
-   }
-
-   return ok;
-}
-
-//+------------------------------------------------------------------+
-//| Calculate lot size using MT5's built-in profit calculator        |
-//+------------------------------------------------------------------+
-double calcLotByRisk(string sym, double entry, double slDist, int side) {
-   double maxRisk = acc.Balance() * (gRiskPct / 100.0);
-   double minV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-   double maxV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
-
-   double slPrice = (side == 1) ? entry - slDist : entry + slDist;
-   int type = (side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-
-   double profit1 = 0;
-   if (!OrderCalcProfit((ENUM_ORDER_TYPE)type, sym, 1.0, entry, slPrice, profit1))
-      return minV;
-   if (profit1 >= 0) return minV;
-
-   double raw = maxRisk / MathAbs(profit1);
-   double lots = MathFloor(raw / step) * step;
-   lots = MathMax(minV, MathMin(lots, maxV));
-   return lots;
-}
-
-//+------------------------------------------------------------------+
 //| Position helpers                                                 |
 //+------------------------------------------------------------------+
 bool hasPos(string sym) {
@@ -981,36 +1143,31 @@ bool hasPos(string sym) {
 void doTrail(int idx) {
    if (!pos.SelectByIndex(idx)) return;
    if (pos.Magic() != (int)gMagic) return;
-
    double sl = pos.StopLoss();
    double open = pos.PriceOpen();
    double curr = pos.PriceCurrent();
    double pt   = SymbolInfoDouble(pos.Symbol(), SYMBOL_POINT);
    double trailPts = gTrailPips * 10 * pt;
    double slNew = sl;
-
    if (pos.PositionType() == POSITION_TYPE_BUY) {
       double trailFrom = open + trailPts * 1.5;
       if (curr > trailFrom) {
          double proposed = curr - trailPts;
-         if (proposed > sl && proposed > open)
-            slNew = proposed;
+         if (proposed > sl && proposed > open) slNew = proposed;
       }
    } else if (pos.PositionType() == POSITION_TYPE_SELL) {
       double trailFrom = open - trailPts * 1.5;
       if (curr < trailFrom) {
          double proposed = curr + trailPts;
-         if ((sl == 0 || proposed < sl) && proposed < open)
-            slNew = proposed;
+         if ((sl == 0 || proposed < sl) && proposed < open) slNew = proposed;
       }
    }
-
    if (slNew != sl)
       trade.PositionModify(pos.Ticket(), slNew, pos.TakeProfit());
 }
 
 //+------------------------------------------------------------------+
-//| Chart comment with execution stats                               |
+//| Chart comment                                                    |
 //+------------------------------------------------------------------+
 void drawComment() {
    int open = 0;
@@ -1021,19 +1178,16 @@ void drawComment() {
          totalPnL += pos.Profit();
       }
    }
-
    double avgSlippage = 0;
    if (execCount > 0) {
       double totalSlip = 0;
-      for (int i = 0; i < execCount; i++)
-         totalSlip += execHistory[i].slippage;
+      for (int i = 0; i < execCount; i++) totalSlip += execHistory[i].slippage;
       avgSlippage = totalSlip / execCount;
    }
-
    string txt = StringFormat(
-      "v9-mt5-bot v2.10 | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f\nTarget: $%d/trade | Track: %s",
+      "v9-mt5-bot v3.00 SCALP | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f\nDaily: %.2f | KillZone: %s | Risk: %.2f%%",
       open, gMaxOpen, totalPnL, acc.Balance(), calcTotalNetProfit(), avgSlippage,
-      gTargetProfit, (gTrackExecution ? "ON" : "OFF"));
+      dailyNetProfit, (isKillZoneActive() ? "ON" : "OFF"), gRiskPct);
    Comment(txt);
 }
 //+------------------------------------------------------------------+

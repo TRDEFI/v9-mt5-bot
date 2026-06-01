@@ -1,57 +1,52 @@
-; v9-mt5-bot configuration template v2.10
+; v9-mt5-bot configuration template v3.00 SCALPING
 ; Copy this file to MT5/MQL5/Files/v9-config.txt and edit as needed
 ; All values shown are examples — adjust for your broker/account
 
-; Symbols to scan (comma separated, no spaces)
+; === Core ===
 ;SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,EURGBP,EURJPY,GBPJPY,XAUUSD,XAGUSD,US30,UK100
-
-; Risk per trade (% of balance)
-;RISK_PCT=1.0
-
-; Maximum open positions
-;MAX_OPEN=4
-
-; Magic number for this EA instance
+;RISK_PCT=0.25
+;MAX_OPEN=6
 ;MAGIC=999001
-
-; Minimum signal score (0.0-1.0)
-;MIN_SCORE=0.75
-
-; Maximum spread allowed (in points)
-;MAX_SPREAD=50.0
-
-; Cooldown between signals per symbol (seconds)
-;COOLDOWN_SEC=300
-
-; Minimum SL distance (pips)
-;MIN_SL_PIPS=15
-
-; Time stop — close position after N minutes
-;TIME_STOP_MIN=240
-
-; Breakeven trigger (pips in profit)
-;BREAKEVEN_PIPS=10
-
-; Enable trailing stop
+;MIN_SCORE=0.70
+;MAX_SPREAD=30.0
+;COOLDOWN_SEC=5
+;MIN_SL_PIPS=3
+;MAX_SL_PIPS=5
+;TIME_STOP_SEC=45
+;BREAKEVEN_PIPS=2
 ;TRAIL=true
-
-; Trailing stop distance (pips)
-;TRAIL_PIPS=15
-
-; Log every N scans
+;TRAIL_PIPS=2
 ;LOG_EVERY=10
-
-; Target net profit per trade (USD, after commission/slippage)
 ;TARGET_PROFIT=10
-
-; Enable execution cost tracking
 ;TRACK_EXECUTION=true
-
-; Snapshot interval for closed trade detection (seconds)
 ;SNAP_INTERVAL_SEC=5
-
-; Track manual closes via bridge API
 ;TRACK_BRIDGE_CLOSES=true
-
-; Log closed trades every N detections (1 = always)
 ;LOG_CLOSED_EVERY=1
+
+; === Scalping Mode ===
+;SCALP_MODE=true
+
+; === Hybrid Detector Weights (TICK_IMB + SPREAD_COMP primary) ===
+;W_TICK_IMB=0.40
+;W_SPREAD_COMP=0.30
+;W_QUOTE_VEL=0.15
+;W_MICRO_PULL=0.08
+;W_CROSS_SYNC=0.04
+;W_ENTROPY=0.03
+;MIN_AGREEING=2
+
+; === Kill Zones (GMT minutes from 00:00) ===
+;KILL_LONDON=true
+;KILL_LONDON_START=800
+;KILL_LONDON_END=1200
+;KILL_NY=true
+;KILL_NY_START=1330
+;KILL_NY_END=1700
+;KILL_ASIAN=true
+;KILL_ASIAN_START=2200
+;KILL_ASIAN_END=200
+
+; === Risk Limits ===
+;DAILY_LOSS_PCT=2.0
+;CORRELATION_FILTER=true
+;ATR_MIN_PIPS=2.0
