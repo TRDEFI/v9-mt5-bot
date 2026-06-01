@@ -152,6 +152,8 @@ int closedCount = 0;
 //+------------------------------------------------------------------+
 ulong    openTickets[];
 int      lastClosedTicket = 0;
+ulong    processedDealTickets[];
+int      processedCount = 0;
 
 //+------------------------------------------------------------------+
 //| Tick data structures                                             |
@@ -337,6 +339,15 @@ void ReadConfig() {
 
 //+------------------------------------------------------------------+
 int OnInit() {
+    int hLock = FileOpen("v9-bot.lock", FILE_TXT|FILE_WRITE|FILE_ANSI);
+    if (hLock == INVALID_HANDLE) {
+       Print("=== OnInit FAILED — another instance is already running ===");
+       Comment("v9-mt5-bot: ANOTHER INSTANCE RUNNING\nClose other charts with this EA");
+       return INIT_FAILED;
+    }
+    FileWrite(hLock, TimeToString(TimeCurrent()));
+    FileClose(hLock);
+
     Print("=== OnInit START ===");
     ReadConfig();
    trade.SetExpertMagicNumber((int)gMagic);
@@ -376,11 +387,12 @@ int OnInit() {
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int r) {
-   Comment("");
-   EventKillTimer();
-   Print("v9-mt5-bot v3.00 stopped (reason=", r, ")");
-   if (closedCount > 0)
-      Print("Session summary: ", closedCount, " closed trades, total net profit: ", calcTotalNetProfit());
+    FileDelete("v9-bot.lock");
+    Comment("");
+    EventKillTimer();
+    Print("v9-mt5-bot v3.00 stopped (reason=", r, ")");
+    if (closedCount > 0)
+       Print("Session summary: ", closedCount, " closed trades, total net profit: ", calcTotalNetProfit());
 }
 
 //+------------------------------------------------------------------+
@@ -674,48 +686,56 @@ void snapshotOpenPositions() {
 }
 
 void detectClosedPositions() {
-   if (closedCount % gLogClosedEvery != 0 && closedCount > 0) return;
-   datetime from = TimeCurrent() - 600;
-   datetime to = TimeCurrent();
-   if (!HistorySelect(from, to)) return;
-   for (int j = HistoryDealsTotal() - 1; j >= 0; j--) {
-      ulong dealTicket = HistoryDealGetTicket(j);
-      if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != (int)gMagic) continue;
-      if (HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
-      ulong ticket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_TICKET);
-      if (ticket == lastClosedTicket) continue;
-      string sym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
-      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
-      string typeStr = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
-      double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-      double comm = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
-      double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
-      double net = profit + comm + swap;
-      datetime closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
-      double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
-      if (closedCount >= ArraySize(closedTrades)) ArrayResize(closedTrades, closedCount + 100);
-      closedTrades[closedCount].openTime = closeTime - 60;
-      closedTrades[closedCount].closeTime = closeTime;
-      closedTrades[closedCount].symbol = sym;
-      closedTrades[closedCount].type = typeStr;
-      closedTrades[closedCount].signalName = "";
-      closedTrades[closedCount].profit = profit;
-      closedTrades[closedCount].commission = comm;
-      closedTrades[closedCount].swap = swap;
-      closedTrades[closedCount].netProfit = net;
-      closedTrades[closedCount].lots = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
-      closedTrades[closedCount].sl = 0;
-      closedTrades[closedCount].tp = 0;
-      closedTrades[closedCount].ticket = ticket;
-      closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
-      closedCount++;
-      lastClosedTicket = ticket;
-      dailyNetProfit += net;
-      Print("CLOSED: ", sym, " | ", typeStr, " | Profit: ", DoubleToString(profit, 2),
-            " | Comm: ", DoubleToString(comm, 2), " | Swap: ", DoubleToString(swap, 2),
-            " | NET: ", DoubleToString(net, 2), " | Reason: ", closedTrades[closedCount-1].closeReason,
-            " | Ticket: ", ticket, " | Daily PnL: ", DoubleToString(dailyNetProfit, 2));
-   }
+    if (closedCount % gLogClosedEvery != 0 && closedCount > 0) return;
+    datetime from = TimeCurrent() - 600;
+    datetime to = TimeCurrent();
+    if (!HistorySelect(from, to)) return;
+    for (int j = HistoryDealsTotal() - 1; j >= 0; j--) {
+       ulong dealTicket = HistoryDealGetTicket(j);
+       if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != (int)gMagic) continue;
+       if (HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+       ulong ticket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_TICKET);
+       if (ticket == lastClosedTicket) continue;
+       bool alreadyProcessed = false;
+       for (int p = 0; p < processedCount; p++) {
+          if (processedDealTickets[p] == ticket) { alreadyProcessed = true; break; }
+       }
+       if (alreadyProcessed) continue;
+       if (processedCount >= ArraySize(processedDealTickets)) ArrayResize(processedDealTickets, processedCount + 100);
+       processedDealTickets[processedCount] = ticket;
+       processedCount++;
+       string sym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+       ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+       string typeStr = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+       double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+       double comm = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+       double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+       double net = profit + comm + swap;
+       datetime closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+       double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
+       if (closedCount >= ArraySize(closedTrades)) ArrayResize(closedTrades, closedCount + 100);
+       closedTrades[closedCount].openTime = closeTime - 60;
+       closedTrades[closedCount].closeTime = closeTime;
+       closedTrades[closedCount].symbol = sym;
+       closedTrades[closedCount].type = typeStr;
+       closedTrades[closedCount].signalName = "";
+       closedTrades[closedCount].profit = profit;
+       closedTrades[closedCount].commission = comm;
+       closedTrades[closedCount].swap = swap;
+       closedTrades[closedCount].netProfit = net;
+       closedTrades[closedCount].lots = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+       closedTrades[closedCount].sl = 0;
+       closedTrades[closedCount].tp = 0;
+       closedTrades[closedCount].ticket = ticket;
+       closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
+       closedCount++;
+       lastClosedTicket = ticket;
+       dailyNetProfit += net;
+       Print("CLOSED: ", sym, " | ", typeStr, " | Profit: ", DoubleToString(profit, 2),
+             " | Comm: ", DoubleToString(comm, 2), " | Swap: ", DoubleToString(swap, 2),
+             " | NET: ", DoubleToString(net, 2), " | Reason: ", closedTrades[closedCount-1].closeReason,
+             " | Ticket: ", ticket, " | Daily PnL: ", DoubleToString(dailyNetProfit, 2));
+    }
 }
 
 string detectCloseReason(string sym, double closePrice, ENUM_DEAL_TYPE dealType) {
