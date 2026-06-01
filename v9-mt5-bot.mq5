@@ -1052,19 +1052,37 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
 //| Calculate lot size                                               |
 //+------------------------------------------------------------------+
 double calcLotByRisk(string sym, double entry, double slDist, int side) {
-   double maxRisk = acc.Balance() * (gRiskPct / 100.0);
-   double minV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
-   double maxV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
-   double slPrice = (side == 1) ? entry - slDist : entry + slDist;
-   int type = (side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   double profit1 = 0;
-   if (!OrderCalcProfit((ENUM_ORDER_TYPE)type, sym, 1.0, entry, slPrice, profit1)) return minV;
-   if (profit1 >= 0) return minV;
-   double raw = maxRisk / MathAbs(profit1);
-   double lots = MathFloor(raw / step) * step;
-   lots = MathMax(minV, MathMin(lots, maxV));
-   return lots;
+    double maxRisk = acc.Balance() * (gRiskPct / 100.0);
+    double minV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+    double maxV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+    double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+    double contractSize = SymbolInfoDouble(sym, SYMBOL_TRADE_CONTRACT_SIZE);
+    double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+    double slPoints = slDist / pt;
+
+    double riskPerLot = 0;
+    if (contractSize > 0 && slPoints > 0) {
+       riskPerLot = slPoints * pt * contractSize;
+    } else {
+       double slPrice = (side == 1) ? entry - slDist : entry + slDist;
+       int type = (side == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+       double profit1 = 0;
+       if (!OrderCalcProfit((ENUM_ORDER_TYPE)type, sym, 1.0, entry, slPrice, profit1)) return minV;
+       if (profit1 >= 0) return minV;
+       riskPerLot = MathAbs(profit1);
+    }
+
+    if (riskPerLot <= 0) return minV;
+
+    double raw = maxRisk / riskPerLot;
+    double lots = MathFloor(raw / step) * step;
+    lots = MathMax(minV, MathMin(lots, 2.0));
+
+    if (StringFind(sym, "XAU") >= 0 || StringFind(sym, "XAG") >= 0 || StringFind(sym, "US30") >= 0 || StringFind(sym, "UK100") >= 0) {
+       lots = MathMin(lots, 0.5);
+    }
+
+    return lots;
 }
 
 //+------------------------------------------------------------------+
