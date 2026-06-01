@@ -891,45 +891,38 @@ void managePositions() {
 //| Scan all symbols for trade signals                                |
 //+------------------------------------------------------------------+
 void scanSymbols() {
-   Print("SCAN_START killZone=", isKillZoneActive(), " dailyLoss=", isDailyLossLimitHit(), " tickCount=", tickCount);
-    if (!isKillZoneActive()) {
-       Print("SCAN_SKIPPED: kill zone inactive");
-       return;
-    }
+    if (!isKillZoneActive()) return;
     if (isDailyLossLimitHit()) {
        if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
        return;
     }
 
-   int openCount = 0;
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) openCount++;
-   }
+    int openCount = 0;
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+       if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) openCount++;
+    }
 
     int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
-    Print("SCAN_LOOP start symCount=", symCount, " openCount=", openCount, " maxOpen=", gMaxOpen);
-    Print("SCAN_BEFORE_LOOP tickCount=", tickCount);
 
     for (int s = 0; s < symCount; s++) {
-       Print("SYM_SCAN: idx=", s, " sym=", syms[s]);
-       if (openCount + placed >= gMaxOpen) { Print("SYM_SKIP maxOpen"); break; }
-       if (hasPos(syms[s])) { skippedPos++; Print("SYM_SKIP hasPos"); continue; }
-       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; Print("SYM_SKIP cooldown"); continue; }
-       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; Print("SYM_SKIP correlated"); continue; }
+       if (openCount + placed >= gMaxOpen) break;
+       if (hasPos(syms[s])) { skippedPos++; continue; }
+       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
+       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
-       Print("SYM_GETRATES: ", syms[s]);
        MqlRates r1[], r5[], r15[];
        int got1, got5, got15;
        if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
-          noSig++; Print("NO_DATA: ", syms[s], " got1=", got1, " got5=", got5, " got15=", got15); continue;
+          noSig++; continue;
        }
 
        double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
-       if (sp > gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)) { skippedSpread++; Print("SKIP_SPREAD: ", syms[s], " sp=", sp, " max=", gMaxSpread * SymbolInfoDouble(syms[s], SYMBOL_POINT)); continue; }
+       double maxSpreadPoints = gMaxSpread * 10.0;
+       if (sp > maxSpreadPoints) { skippedSpread++; continue; }
 
        double atr = calcAtr(r1, got1, 14);
        double minAtr = gAtrMinPips * 10 * SymbolInfoDouble(syms[s], SYMBOL_POINT);
-       if (atr < minAtr) { noSig++; Print("SKIP_ATR: ", syms[s], " atr=", DoubleToString(atr,5), " min=", DoubleToString(minAtr,5)); continue; }
+       if (atr < minAtr) { noSig++; continue; }
 
        HybridSignal sig;
        if (getHybridSignal(s, sig)) {
@@ -946,10 +939,10 @@ void scanSymbols() {
        }
     }
 
-   if (tickCount % gLogEvery == 0)
-      Print("=== SCAN | open=", openCount, " placed=", placed,
-            " hasPos=", skippedPos, " cooldown=", skippedCool,
-            " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig);
+    if (tickCount % gLogEvery == 0)
+       Print("=== SCAN | open=", openCount, " placed=", placed,
+             " hasPos=", skippedPos, " cooldown=", skippedCool,
+             " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig);
 }
 
 //+------------------------------------------------------------------+
