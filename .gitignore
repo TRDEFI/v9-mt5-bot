@@ -1,4 +1,25 @@
+# MT5 and OS files
+*.ex5
+*.log
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+
+# Secrets and credentials
+*.pem
+*.key
+*.env
+.env.local
+credentials.json
+
+# MT5 paths (user-specific)
+MQL5/Experts/v9-mt5-bot.ex5
+MQL5/Files/v9-config.txt
+MQL5/Include/SocketBridgeEA*
+MQL5/logs/
+
+# Node.js (if any server components added later)
 node_modules/
 dist/
 .env
-*.log

@@ -1,0 +1,48 @@
+; v9-mt5-bot configuration template
+; Copy this file to MT5/MQL5/Files/v9-config.txt and edit as needed
+; All values shown are examples — adjust for your broker/account
+
+; Symbols to scan (comma separated, no spaces)
+;SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,EURGBP,EURJPY,GBPJPY,XAUUSD,XAGUSD,US30,UK100
+
+; Risk per trade (% of balance)
+;RISK_PCT=1.0
+
+; Maximum open positions
+;MAX_OPEN=4
+
+; Magic number for this EA instance
+;MAGIC=999001
+
+; Minimum signal score (0.0-1.0)
+;MIN_SCORE=0.75
+
+; Maximum spread allowed (in points)
+;MAX_SPREAD=50.0
+
+; Cooldown between signals per symbol (seconds)
+;COOLDOWN_SEC=300
+
+; Minimum SL distance (pips)
+;MIN_SL_PIPS=15
+
+; Time stop — close position after N minutes
+;TIME_STOP_MIN=240
+
+; Breakeven trigger (pips in profit)
+;BREAKEVEN_PIPS=10
+
+; Enable trailing stop
+;TRAIL=true
+
+; Trailing stop distance (pips)
+;TRAIL_PIPS=15
+
+; Log every N scans
+;LOG_EVERY=10
+
+; Target net profit per trade (USD, after commission/slippage)
+;TARGET_PROFIT=10
+
+; Enable execution cost tracking
+;TRACK_EXECUTION=true
