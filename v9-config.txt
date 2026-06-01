@@ -1,4 +1,4 @@
-; v9-mt5-bot configuration template
+; v9-mt5-bot configuration template v2.10
 ; Copy this file to MT5/MQL5/Files/v9-config.txt and edit as needed
 ; All values shown are examples — adjust for your broker/account
 
@@ -46,3 +46,12 @@
 
 ; Enable execution cost tracking
 ;TRACK_EXECUTION=true
+
+; Snapshot interval for closed trade detection (seconds)
+;SNAP_INTERVAL_SEC=5
+
+; Track manual closes via bridge API
+;TRACK_BRIDGE_CLOSES=true
+
+; Log closed trades every N detections (1 = always)
+;LOG_CLOSED_EVERY=1

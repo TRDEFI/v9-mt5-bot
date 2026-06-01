@@ -29,6 +29,9 @@ input int    InpTrailPips   = 15;
 input int    InpLogEvery    = 10;
 input int    InpTargetProfit = 10;
 input bool   InpTrackExecution = true;
+input int    InpSnapIntervalSec = 5;
+input bool   InpTrackBridgeCloses = true;
+input int    InpLogClosedEvery = 1;
 
 // runtime overrides (config file)
 string   gSymbols;
@@ -46,6 +49,9 @@ int      gTrailPips;
 int      gLogEvery;
 int      gTargetProfit;
 bool     gTrackExecution;
+int      gSnapIntervalSec;
+bool     gTrackBridgeCloses;
+int      gLogClosedEvery;
 
 //+------------------------------------------------------------------+
 //| Execution tracking structs                                       |
@@ -94,6 +100,12 @@ ClosedTrade closedTrades[];
 int closedCount = 0;
 
 //+------------------------------------------------------------------+
+//| Position snapshot for detecting server-side closes               |
+//+------------------------------------------------------------------+
+ulong    openTickets[];
+int      lastClosedTicket = 0;
+
+//+------------------------------------------------------------------+
 //| 1s kline structs                                                 |
 //+------------------------------------------------------------------+
 #define MAX_SEC_BARS 300
@@ -137,6 +149,7 @@ datetime lastScanTime;
 int      timerMs = 200;
 int      scanIntervalMs = 1000;
 int      tickCount = 0;
+int      snapCounter = 0;
 
 //+------------------------------------------------------------------+
 //| Config file parser                                                |
@@ -160,6 +173,9 @@ void ReadConfig() {
    gBE = InpBreakevenPips; gTrail = InpTrail; gTrailPips = InpTrailPips; gLogEvery = InpLogEvery;
    gTargetProfit = InpTargetProfit;
    gTrackExecution = InpTrackExecution;
+   gSnapIntervalSec = InpSnapIntervalSec;
+   gTrackBridgeCloses = InpTrackBridgeCloses;
+   gLogClosedEvery = InpLogClosedEvery;
 
    int h = FileOpen(CONFIG_FILE, FILE_TXT|FILE_READ|FILE_ANSI);
    if (h == INVALID_HANDLE) {
@@ -195,6 +211,9 @@ void ReadConfig() {
       else if (key == "LOG_EVERY") gLogEvery = (int)StringToInteger(val);
       else if (key == "TARGET_PROFIT") gTargetProfit = (int)StringToInteger(val);
       else if (key == "TRACK_EXECUTION") gTrackExecution = (StringToInteger(val) != 0);
+      else if (key == "SNAP_INTERVAL_SEC") gSnapIntervalSec = (int)StringToInteger(val);
+      else if (key == "TRACK_BRIDGE_CLOSES") gTrackBridgeCloses = (StringToInteger(val) != 0);
+      else if (key == "LOG_CLOSED_EVERY") gLogClosedEvery = (int)StringToInteger(val);
       else Print("Unknown config key: ", key);
    }
    FileClose(h);
@@ -221,6 +240,7 @@ int OnInit() {
    EventSetMillisecondTimer(timerMs);
    Print("v9-mt5-bot v2.10 ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
    Print("Target profit: $", gTargetProfit, " | Execution tracking: ", (gTrackExecution ? "ON" : "OFF"));
+   Print("Snap interval: ", gSnapIntervalSec, "s | Bridge close tracking: ", (gTrackBridgeCloses ? "ON" : "OFF"));
    Comment("v9-mt5-bot v2.10 INIT\n", n, " symbols | target: $", gTargetProfit, "/trade");
    return INIT_SUCCEEDED;
 }
@@ -235,39 +255,104 @@ void OnDeinit(const int r) {
 }
 
 //+------------------------------------------------------------------+
-//| Track closed trades (called from managePositions)               |
+//| OnTrade: detect server-side closes (SL/TP/manual)                |
 //+------------------------------------------------------------------+
-void trackClosedTrade(string sym, string reason) {
+void OnTrade() {
+   detectClosedPositions();
+}
+
+//+------------------------------------------------------------------+
+//| Position snapshot for detecting server-side closes               |
+//+------------------------------------------------------------------+
+void snapshotOpenPositions() {
+   int count = 0;
    for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (!pos.SelectByIndex(i)) continue;
-      if (pos.Symbol() != sym || pos.Magic() != (int)gMagic) continue;
+      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic)
+         count++;
+   }
+   ArrayResize(openTickets, count);
+   count = 0;
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) {
+         openTickets[count] = pos.Ticket();
+         count++;
+      }
+   }
+}
+
+void detectClosedPositions() {
+   if (closedCount % gLogClosedEvery != 0 && closedCount > 0) return;
+
+   datetime from = TimeCurrent() - 600;
+   datetime to = TimeCurrent();
+   if (!HistorySelect(from, to)) return;
+
+   for (int j = HistoryDealsTotal() - 1; j >= 0; j--) {
+      ulong dealTicket = HistoryDealGetTicket(j);
+      if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != (int)gMagic) continue;
+      if (HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+
+      ulong ticket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_TICKET);
+      if (ticket == lastClosedTicket) continue;
+
+      string sym = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+      ENUM_DEAL_TYPE dealType = (ENUM_DEAL_TYPE)HistoryDealGetInteger(dealTicket, DEAL_TYPE);
+      string typeStr = (dealType == DEAL_TYPE_BUY) ? "BUY" : "SELL";
+      double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+      double comm = HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+      double swap = HistoryDealGetDouble(dealTicket, DEAL_SWAP);
+      double net = profit + comm + swap;
+      datetime closeTime = (datetime)HistoryDealGetInteger(dealTicket, DEAL_TIME);
+      double closePrice = HistoryDealGetDouble(dealTicket, DEAL_PRICE);
 
       if (closedCount >= ArraySize(closedTrades))
          ArrayResize(closedTrades, closedCount + 100);
 
-      closedTrades[closedCount].openTime = pos.Time();
-      closedTrades[closedCount].closeTime = TimeCurrent();
-      closedTrades[closedCount].symbol = pos.Symbol();
-      closedTrades[closedCount].type = (pos.PositionType() == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-      closedTrades[closedCount].signalName = pos.Comment();
-      closedTrades[closedCount].profit = pos.Profit();
-      closedTrades[closedCount].commission = pos.Commission();
-      closedTrades[closedCount].swap = pos.Swap();
-      closedTrades[closedCount].netProfit = pos.Profit() + pos.Commission() + pos.Swap();
-      closedTrades[closedCount].lots = pos.Volume();
-      closedTrades[closedCount].sl = pos.StopLoss();
-      closedTrades[closedCount].tp = pos.TakeProfit();
-      closedTrades[closedCount].ticket = pos.Ticket();
-      closedTrades[closedCount].closeReason = reason;
+      closedTrades[closedCount].openTime = closeTime - 3600;
+      closedTrades[closedCount].closeTime = closeTime;
+      closedTrades[closedCount].symbol = sym;
+      closedTrades[closedCount].type = typeStr;
+      closedTrades[closedCount].signalName = "";
+      closedTrades[closedCount].profit = profit;
+      closedTrades[closedCount].commission = comm;
+      closedTrades[closedCount].swap = swap;
+      closedTrades[closedCount].netProfit = net;
+      closedTrades[closedCount].lots = HistoryDealGetDouble(dealTicket, DEAL_VOLUME);
+      closedTrades[closedCount].sl = 0;
+      closedTrades[closedCount].tp = 0;
+      closedTrades[closedCount].ticket = ticket;
+      closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
       closedCount++;
 
-      Print("CLOSED: ", pos.Symbol(), " | ", pos.Comment(),
-            " | Profit: ", DoubleToString(pos.Profit(), 2),
-            " | Comm: ", DoubleToString(pos.Commission(), 2),
-            " | Swap: ", DoubleToString(pos.Swap(), 2),
-            " | NET: ", DoubleToString(closedTrades[closedCount-1].netProfit, 2),
-            " | Reason: ", reason);
+      lastClosedTicket = ticket;
+
+      Print("CLOSED: ", sym, " | ", typeStr,
+            " | Profit: ", DoubleToString(profit, 2),
+            " | Comm: ", DoubleToString(comm, 2),
+            " | Swap: ", DoubleToString(swap, 2),
+            " | NET: ", DoubleToString(net, 2),
+            " | Reason: ", closedTrades[closedCount-1].closeReason,
+            " | Ticket: ", ticket);
    }
+}
+
+string detectCloseReason(string sym, double closePrice, ENUM_DEAL_TYPE dealType) {
+   for (int i = PositionsTotal() - 1; i >= 0; i--) {
+      if (!pos.SelectByIndex(i)) continue;
+      if (pos.Magic() != (int)gMagic) continue;
+      if (pos.Symbol() != sym) continue;
+
+      double sl = pos.StopLoss();
+      double tp = pos.TakeProfit();
+      double open = pos.PriceOpen();
+      double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+
+      if (sl > 0 && MathAbs(closePrice - sl) < 3 * pt) return "SL_HIT";
+      if (tp > 0 && MathAbs(closePrice - tp) < 3 * pt) return "TP_HIT";
+      if (gBE > 0 && MathAbs(closePrice - open) < 3 * pt) return "BREAKEVEN";
+      if (gTimeStop > 0 && (TimeCurrent() - pos.Time()) >= gTimeStop * 60) return "TIME_STOP";
+   }
+   return "MANUAL_OR_OTHER";
 }
 
 double calcTotalNetProfit() {
@@ -299,7 +384,15 @@ void OnTimer() {
       scanSymbols();
    }
 
-   // 5. update chart
+   // 5. position snapshot + closed trade detection
+   snapCounter++;
+   if (gTrackBridgeCloses && snapCounter >= gSnapIntervalSec) {
+      snapCounter = 0;
+      snapshotOpenPositions();
+      detectClosedPositions();
+   }
+
+   // 6. update chart
    drawComment();
 }
 
@@ -418,7 +511,6 @@ void managePositions() {
          if (age >= gTimeStop * 60) {
             Print(pos.Symbol(), " | TIME STOP — age=", age / 60, "min, closing ticket=", pos.Ticket());
             trade.PositionClose(pos.Ticket());
-            trackClosedTrade(pos.Symbol(), "TIME_STOP");
             continue;
          }
       }
@@ -651,7 +743,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
    double p     = r15[got15 - 1].close;
    double dev   = ((p - ma10) / ma10) * 100;
 
-   // MTF trend alignment
    bool tf1Bull = r1[got1-1].close > calcEma(r1, got1, 20);
    bool tf3Bull = r3[got3-1].close > calcEma(r3, got3, 20);
    bool tf15Bull = r15[got15-1].close > calcEma(r15, got15, 20);
@@ -681,7 +772,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
    double lastO = r15[got15 - 1].open, lastC = r15[got15 - 1].close;
    bool green = lastC > lastO;
 
-   // RSI oversold/overbought with MTF confirmation
    if (rsiPrev >= 30 && rsi < 30 && green && rsi3 < 40) {
       names[sigN] = "RSI_OVERSOLD"; scores[sigN] = 0.88; sides[sigN] = 1;
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
@@ -691,7 +781,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
    }
 
-   // MA10 bounce with MTF trend
    if (dev < -2.5 && rsi < 40 && trendUp) {
       names[sigN] = "MA10_BOUNCE"; scores[sigN] = 0.86; sides[sigN] = 1;
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
@@ -701,7 +790,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
    }
 
-   // EMA cross with volume and ADX filter
    double ema9Prev  = calcEma(r15, got15 - 1, 9);
    double ema21Prev = calcEma(r15, got15 - 1, 21);
    bool crossUp  = ema9Prev <= ema21Prev && ema9 > ema21;
@@ -717,7 +805,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
    }
 
-   // BB reversal with MACD confirmation
    if (bbDn > 0 && p < bbDn * 1.002 && rsi < 35 && vr > 1.3 && ema50 > 0 && p > ema50 * 0.995 && macdHist > 0) {
       names[sigN] = "BB_REV_LONG"; scores[sigN] = 0.87; sides[sigN] = 1;
       avgMoves[sigN] = atr; tpVals[sigN] = bbSma; slVals[sigN] = bbDn * 0.997; sigN++;
@@ -727,7 +814,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = bbSma; slVals[sigN] = bbUp * 1.003; sigN++;
    }
 
-   // Trend with stochastic confirmation
    if (ma10 > ma20 && dev < -1.5 && rsi < 50 && stochK < 30 && trendUp) {
       names[sigN] = "TREND_LONG"; scores[sigN] = 0.84; sides[sigN] = 1;
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
@@ -737,7 +823,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
    }
 
-   // Volume breakout with MTF
    if (vr > 2.5 && p > ma10 && rsi < 60 && rsi1 < 65 && tf1Bull) {
       names[sigN] = "VOL_BREAKUP"; scores[sigN] = 0.82; sides[sigN] = 1;
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
@@ -747,7 +832,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       avgMoves[sigN] = atr; tpVals[sigN] = 0; slVals[sigN] = 0; sigN++;
    }
 
-   // Momentum with trend
    if (vr > 2.0 && got15 >= 3) {
       int d1 = (r15[got15 - 3].close > r15[got15 - 3].open) ? 1 : -1;
       int d2 = (r15[got15 - 2].close > r15[got15 - 2].open) ? 1 : -1;
@@ -765,7 +849,6 @@ bool getSignal(const MqlRates &r1[], const MqlRates &r3[], const MqlRates &r15[]
       }
    }
 
-   // Squeeze with stochastic
    if (vr < 0.5 && adx < 20) {
       if (rsi < 35 && stochK < 20) {
          names[sigN] = "SQUEEZE_LONG"; scores[sigN] = 0.80; sides[sigN] = 1;
@@ -814,7 +897,6 @@ bool execTrade(string sym, Signal &sig) {
    double sl = (sig.sl > 0) ? sig.sl : (sig.side == 1) ? price - slDist : price + slDist;
    double tp = (sig.tp > 0) ? sig.tp : (sig.side == 1) ? price + slDist * 1.5 : price - slDist * 1.5;
 
-   // Enforce minimum $10 net profit target (account for commission ~$2-3 + target $10)
    double minProfitDist = (gTargetProfit + 5.0) / (lots * 100000.0 / SymbolInfoDouble(sym, SYMBOL_POINT));
    if (sig.side == 1) {
       tp = MathMax(tp, price + MathMax(slDist * 1.5, minProfitDist));
