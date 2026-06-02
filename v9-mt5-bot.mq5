@@ -1065,8 +1065,8 @@ void scanSymbols() {
        if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
        if (hasPos(syms[s])) { skippedPos++; continue; }
        if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
-        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 30) { skippedCool++; continue; }
-        if (syms[s] == "XAGUSD") { skippedCool++; continue; }
+        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) { skippedCool++; continue; }
+        if (syms[s] == "XAGUSD" || syms[s] == "XAUUSD") { skippedCool++; continue; }
         if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
        MqlRates r1[], r5[], r15[];
