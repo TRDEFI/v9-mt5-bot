@@ -61,6 +61,7 @@ input int    InpKillAsianEnd    = 200;
 input double InpDailyLossPct = 2.0;
 input bool   InpCorrelationFilter = true;
 input double InpAtrMinPips   = 2.0;
+input double InpMaxLotCap    = 0.5;
 
 // runtime overrides (config file)
 string   gSymbols;
@@ -102,6 +103,16 @@ int      gKillAsianEnd;
 double   gDailyLossPct;
 bool     gCorrelationFilter;
 double   gAtrMinPips;
+string   gLockName;
+datetime gLastLockRenew;
+int      gLogHandle = INVALID_HANDLE;
+int      gScanCount = 0;
+int      gSignalCount = 0;
+int      gTradeCount = 0;
+int      gFailCount = 0;
+datetime gLastHourlyLog = 0;
+int      gCurrentDay = -1;
+double   gMaxLotCap;
 
 //+------------------------------------------------------------------+
 //| Execution tracking structs                                       |
@@ -209,6 +220,10 @@ struct TickState {
    long     curVol;
    bool     ticking;
    datetime lastSignalTime;
+   datetime lastCloseTime;
+   int      lastCloseSide;
+   int      failCount;
+   datetime failUntil;
 };
 
 //+------------------------------------------------------------------+
@@ -247,6 +262,13 @@ string corrGroups[][3] = {
 //+------------------------------------------------------------------+
 #define CONFIG_FILE "v9-config.txt"
 
+void LOG(string event, string symbol, string details) {
+   string line = StringFormat("%s | %s | %s | %s",
+      TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS), event, symbol, details);
+   Print(line);
+   if (gLogHandle != INVALID_HANDLE) FileWrite(gLogHandle, line);
+}
+
 void Trim(string &s) {
    int len = StringLen(s);
    int start = 0;
@@ -272,7 +294,7 @@ void ReadConfig() {
     gKillLondon = InpKillLondon; gKillLondonStart = (InpKillLondonStart/100)*60 + (InpKillLondonStart%100); gKillLondonEnd = (InpKillLondonEnd/100)*60 + (InpKillLondonEnd%100);
     gKillNY = InpKillNY; gKillNYStart = (InpKillNYStart/100)*60 + (InpKillNYStart%100); gKillNYEnd = (InpKillNYEnd/100)*60 + (InpKillNYEnd%100);
     gKillAsian = InpKillAsian; gKillAsianStart = (InpKillAsianStart/100)*60 + (InpKillAsianStart%100); gKillAsianEnd = (InpKillAsianEnd/100)*60 + (InpKillAsianEnd%100);
-    gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips;
+    gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips; gMaxLotCap = InpMaxLotCap;
 
    int h = FileOpen(CONFIG_FILE, FILE_TXT|FILE_READ|FILE_ANSI);
    if (h == INVALID_HANDLE) {
@@ -332,6 +354,7 @@ void ReadConfig() {
       else if (key == "DAILY_LOSS_PCT") gDailyLossPct = StringToDouble(val);
       else if (key == "CORRELATION_FILTER") gCorrelationFilter = (StringToInteger(val) != 0);
       else if (key == "ATR_MIN_PIPS") gAtrMinPips = StringToDouble(val);
+      else if (key == "MAX_LOT_CAP") gMaxLotCap = StringToDouble(val);
       else Print("Unknown config key: ", key);
    }
    FileClose(h);
@@ -339,14 +362,27 @@ void ReadConfig() {
 
 //+------------------------------------------------------------------+
 int OnInit() {
-    int hLock = FileOpen("v9-bot.lock", FILE_TXT|FILE_WRITE|FILE_ANSI);
-    if (hLock == INVALID_HANDLE) {
-       Print("=== OnInit FAILED — another instance is already running ===");
-       Comment("v9-mt5-bot: ANOTHER INSTANCE RUNNING\nClose other charts with this EA");
-       return INIT_FAILED;
+    gLockName = "v9_mt5_bot_lock_" + IntegerToString((int)AccountInfoInteger(ACCOUNT_LOGIN));
+    if (GlobalVariableCheck(gLockName)) {
+       long prevPid = (long)GlobalVariableGet(gLockName);
+       if (TimeCurrent() - (datetime)prevPid < 86400) {
+          Print("=== OnInit FAILED — another instance is already running (lock age=",
+                TimeCurrent() - (datetime)prevPid, "s) ===");
+          Comment("v9-mt5-bot: ANOTHER INSTANCE RUNNING\nClose other charts with this EA");
+          return INIT_FAILED;
+       }
+       GlobalVariableDel(gLockName);
     }
-    FileWrite(hLock, TimeToString(TimeCurrent()));
-    FileClose(hLock);
+    GlobalVariableSet(gLockName, (double)TimeCurrent());
+    gLastLockRenew = TimeCurrent();
+
+    gLogHandle = FileOpen("v9-bot.log", FILE_WRITE|FILE_TAIL|FILE_ANSI);
+    if (gLogHandle != INVALID_HANDLE) {
+       FileWrite(gLogHandle, "--- v9-mt5-bot started " + TimeToString(TimeCurrent()) + " ---");
+       Print("LOG_FILE_OK: v9-bot.log opened, handle=", gLogHandle);
+    } else {
+       Print("LOG_FILE_FAIL: GetLastError=", GetLastError(), " — file logging disabled");
+    }
 
     Print("=== OnInit START ===");
     ReadConfig();
@@ -387,7 +423,12 @@ int OnInit() {
 
 //+------------------------------------------------------------------+
 void OnDeinit(const int r) {
-    FileDelete("v9-bot.lock");
+    if (GlobalVariableCheck(gLockName)) GlobalVariableDel(gLockName);
+    if (gLogHandle != INVALID_HANDLE) {
+       FileWrite(gLogHandle, "--- v9-mt5-bot stopped reason=" + IntegerToString(r) + " ---");
+       FileClose(gLogHandle);
+       gLogHandle = INVALID_HANDLE;
+    }
     Comment("");
     EventKillTimer();
     Print("v9-mt5-bot v3.00 stopped (reason=", r, ")");
@@ -448,9 +489,9 @@ void feedTickData(int s) {
 //| Tick-based detectors                                             |
 //+------------------------------------------------------------------+
 double calcTickImbalance(int s) {
-   if (symSt[s].tickCount < 20) return 0;
+   if (symSt[s].tickCount < 30) return 0;
    int up = 0, down = 0;
-   for (int i = 0; i < 20; i++) {
+   for (int i = 0; i < 30; i++) {
       if (i >= symSt[s].tickCount) break;
       int idx = (symSt[s].tickHead - 1 - i + MAX_TICK_BUF) % MAX_TICK_BUF;
       if (i == 0) continue;
@@ -458,11 +499,11 @@ double calcTickImbalance(int s) {
       if (symSt[s].ticks[idx].bid > symSt[s].ticks[prev].bid) up++;
       else if (symSt[s].ticks[idx].bid < symSt[s].ticks[prev].bid) down++;
    }
-    int total = up + down;
-    if (total < 10) return 0;
-    double ratio = (double)MathMax(up, down) / total;
-    if (ratio >= 0.55) return ratio;
-    return 0;
+   int total = up + down;
+   if (total < 15) return 0;
+   double ratio = (double)MathMax(up, down) / total;
+   if (ratio >= 0.65) return ratio;
+   return 0;
 }
 
 double calcSpreadCompression(int s) {
@@ -556,16 +597,22 @@ bool isKillZoneActive() {
    MqlDateTime dt;
    TimeToStruct(now, dt);
    int gmtMinutes = dt.hour * 60 + dt.min;
-   if (gKillLondon && gmtMinutes >= gKillLondonStart && gmtMinutes <= gKillLondonEnd) return true;
-   if (gKillNY && gmtMinutes >= gKillNYStart && gmtMinutes <= gKillNYEnd) return true;
+   bool active = false;
+   if (gKillLondon && gmtMinutes >= gKillLondonStart && gmtMinutes <= gKillLondonEnd) active = true;
+   if (gKillNY && gmtMinutes >= gKillNYStart && gmtMinutes <= gKillNYEnd) active = true;
    if (gKillAsian) {
       if (gKillAsianStart > gKillAsianEnd) {
-         if (gmtMinutes >= gKillAsianStart || gmtMinutes <= gKillAsianEnd) return true;
+         if (gmtMinutes >= gKillAsianStart || gmtMinutes <= gKillAsianEnd) active = true;
       } else {
-         if (gmtMinutes >= gKillAsianStart && gmtMinutes <= gKillAsianEnd) return true;
+         if (gmtMinutes >= gKillAsianStart && gmtMinutes <= gKillAsianEnd) active = true;
       }
    }
-   return false;
+   static bool lastActive = false;
+   if (active != lastActive) {
+      LOG("KILLZONE", "ALL", active ? "ON" : "OFF");
+      lastActive = active;
+   }
+   return active;
 }
 
 bool isDailyLossLimitHit() {
@@ -646,12 +693,25 @@ bool getHybridSignal(int s, HybridSignal &out) {
       if (side == 0) side = eSide; else if (side != eSide) agreeing--;
    }
 
-    if (agreeing < gMinAgreeing || side == 0) {
+    int requiredAgree = gMinAgreeing;
+    if (gScalpMode) requiredAgree = MathMax(requiredAgree, 3);
+
+    if (agreeing < requiredAgree || side == 0) {
        int mtfSide = 0;
        double mtfScore = calcMtfSignal(s, mtfSide);
        if (mtfScore > 0 && mtfSide != 0) {
+          if (gScalpMode && mtfScore < 0.80) return false;
+          double adjMtf = mtfScore;
+          if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) {
+             if (ts[s].lastCloseSide == mtfSide) {
+                adjMtf *= 0.7;
+                if (adjMtf < gMinScore) return false;
+             } else {
+                adjMtf *= 1.2;
+             }
+          }
           out.name = "MTF_SCALP";
-          out.score = mtfScore;
+          out.score = adjMtf;
           out.side = mtfSide;
           return true;
        }
@@ -659,11 +719,34 @@ bool getHybridSignal(int s, HybridSignal &out) {
     }
 
     double composite = gWTickImb * imb + gWSpreadComp * spreadComp + gWQuoteVel * vel + gWMicroPull * pull + gWCrossSync * sync + gWEntropy * entropy;
-    if (composite < gMinScore) return false;
+    if (composite < gMinScore) {
+       if (gScalpMode) {
+          int mtfSide = 0;
+          double mtfScore = calcMtfSignal(s, mtfSide);
+          if (mtfScore >= 0.80 && mtfSide != 0) {
+             out.name = "MTF_SCALP_STRICT";
+             out.score = mtfScore;
+             out.side = mtfSide;
+             return true;
+          }
+       }
+       return false;
+    }
+
+    double adjScore = composite;
+    if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) {
+       if (ts[s].lastCloseSide == side) {
+          adjScore *= 0.7;
+          if (adjScore < gMinScore) return false;
+       } else {
+          adjScore *= 1.2;
+       }
+    }
 
     out.name = "HYBRID_SCALP";
-    out.score = composite;
+    out.score = adjScore;
     out.side = side;
+    gSignalCount++;
     return true;
 }
 
@@ -729,12 +812,19 @@ void detectClosedPositions() {
        closedTrades[closedCount].ticket = ticket;
        closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
        closedCount++;
+       for (int s2=0; s2<symCount; s2++) {
+          if (syms[s2] == sym) {
+             ts[s2].lastCloseTime = closeTime;
+             ts[s2].lastCloseSide = (typeStr == "BUY") ? -1 : 1;
+             ts[s2].failCount = 0;
+             ts[s2].failUntil = 0;
+             break;
+          }
+       }
        lastClosedTicket = ticket;
        dailyNetProfit += net;
-       Print("CLOSED: ", sym, " | ", typeStr, " | Profit: ", DoubleToString(profit, 2),
-             " | Comm: ", DoubleToString(comm, 2), " | Swap: ", DoubleToString(swap, 2),
-             " | NET: ", DoubleToString(net, 2), " | Reason: ", closedTrades[closedCount-1].closeReason,
-             " | Ticket: ", ticket, " | Daily PnL: ", DoubleToString(dailyNetProfit, 2));
+       LOG("TRADE_CLOSE", sym, StringFormat("%s profit=%.2f comm=%.2f swap=%.2f net=%.2f reason=%s ticket=%d",
+             typeStr, profit, comm, swap, net, closedTrades[closedCount-1].closeReason, ticket));
     }
 }
 
@@ -765,8 +855,26 @@ double calcTotalNetProfit() {
 //| Timer: main loop every 50ms                                      |
 //+------------------------------------------------------------------+
 void OnTimer() {
-   Print("TIMER tickCount=", tickCount, " symCount=", symCount);
    tickCount++;
+
+   if (gLastLockRenew == 0 || TimeCurrent() - gLastLockRenew >= 60) {
+      GlobalVariableSet(gLockName, (double)TimeCurrent());
+      gLastLockRenew = TimeCurrent();
+   }
+
+   MqlDateTime dtNow;
+   TimeToStruct(TimeCurrent(), dtNow);
+   if (gCurrentDay != dtNow.day_of_year) {
+      gCurrentDay = dtNow.day_of_year;
+      dailyNetProfit = 0;
+      LOG("DAILY_RESET", "ALL", "dailyNetProfit=0");
+   }
+
+   if (TimeCurrent() - gLastHourlyLog >= 3600) {
+      gLastHourlyLog = TimeCurrent();
+      LOG("HOURLY", "ALL", StringFormat("scans=%d signals=%d trades=%d failed=%d pnl=%.2f",
+            gScanCount, gSignalCount, gTradeCount, gFailCount, dailyNetProfit));
+   }
 
     // 1. feed ticks for all symbols
     for (int s = 0; s < symCount; s++)
@@ -781,7 +889,15 @@ void OnTimer() {
    // 4. scan for signals (every 200ms)
    if (GetTickCount() - lastScanTime >= scanIntervalMs) {
       lastScanTime = GetTickCount();
-      scanSymbols();
+      gScanCount++;
+      if (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ||
+          !MQLInfoInteger(MQL_TRADE_ALLOWED) ||
+          !AccountInfoInteger(ACCOUNT_TRADE_ALLOWED)) {
+         if (tickCount % (gLogEvery * 20) == 0)
+            Print("ALGO_TRADING_DISABLED — skipping scan");
+      } else {
+         scanSymbols();
+      }
    }
 
    // 5. position snapshot + closed trade detection
@@ -900,7 +1016,9 @@ void managePositions() {
          double curr  = pos.PriceCurrent();
          double sl    = pos.StopLoss();
          double pt    = SymbolInfoDouble(pos.Symbol(), SYMBOL_POINT);
-         double bePts = gBE * 10 * pt;
+         int    dgt   = (int)SymbolInfoInteger(pos.Symbol(), SYMBOL_DIGITS);
+         double pm    = (dgt == 3 || dgt == 5) ? 10.0 : 1.0;
+         double bePts = gBE * pm * pt;
          if (pos.PositionType() == POSITION_TYPE_BUY) {
             if (curr - open >= bePts && (sl == 0 || sl < open)) {
                trade.PositionModify(pos.Ticket(), open, pos.TakeProfit());
@@ -934,10 +1052,12 @@ void scanSymbols() {
 
     int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
 
-    for (int s = 0; s < symCount; s++) {
+     for (int s = 0; s < symCount; s++) {
        if (openCount + placed >= gMaxOpen) break;
+       if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
        if (hasPos(syms[s])) { skippedPos++; continue; }
        if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
+       if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 30) { skippedCool++; continue; }
        if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
        MqlRates r1[], r5[], r15[];
@@ -1001,11 +1121,20 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    double price = (sig.side == 1) ? ask : bid;
-   double pt   = SymbolInfoDouble(sym, SYMBOL_POINT);
-   double minSL = gMinSL * 10 * pt;
-   double maxSL = gMaxSL * 10 * pt;
+   double pt    = SymbolInfoDouble(sym, SYMBOL_POINT);
+   int    digits= (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   double pipMult = (digits == 3 || digits == 5) ? 10.0 : 1.0;
+   double minSL = gMinSL * pipMult * pt;
+   double maxSL = gMaxSL * pipMult * pt;
 
-   double slDist = MathMax(minSL, maxSL);
+   double slDist = maxSL;
+   MqlRates rTmp[];
+   int gotTmp = CopyRates(sym, PERIOD_M1, 1, 30, rTmp);
+   if (gotTmp >= 20) {
+      double atrVal = calcAtr(rTmp, gotTmp, 14);
+      double atrPips = (pt > 0) ? (atrVal / pt / pipMult) : gMaxSL;
+      slDist = MathMin(maxSL, MathMax(minSL, atrPips * 0.5));
+   }
    double lots = calcLotByRisk(sym, price, slDist, sig.side);
    if (lots < SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN)) return false;
 
@@ -1021,9 +1150,9 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
    if (ok) {
       double fillPrice = trade.ResultPrice();
       double slippage = MathAbs(fillPrice - price);
-      Print(sym, " | SCALP ", typeStr, " ", sig.name, " score=", DoubleToString(sig.score, 2),
-            " lots=", lots, " req=", price, " fill=", fillPrice, " slip=", DoubleToString(slippage, 5),
-            " sl=", sl, " tp=", tp, " ticket=", trade.ResultOrder());
+      gTradeCount++;
+      LOG("TRADE_OPEN", sym, StringFormat("%s %s score=%.2f lots=%.2f req=%.5f fill=%.5f slip=%.5f sl=%.5f tp=%.5f ticket=%d",
+            typeStr, sig.name, sig.score, lots, price, fillPrice, slippage, sl, tp, trade.ResultOrder()));
       if (gTrackExecution) {
          if (execCount >= ArraySize(execHistory)) ArrayResize(execHistory, execCount + 100);
          execHistory[execCount].time = TimeCurrent();
@@ -1040,10 +1169,27 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
          execHistory[execCount].slippage = slippage;
          execCount++;
       }
+      for (int ss=0; ss<symCount; ss++) {
+         if (syms[ss] == sym) {
+            ts[ss].failCount = 0;
+            ts[ss].failUntil = 0;
+            break;
+         }
+      }
       lastTradeTime = TimeCurrent();
    } else {
-      Print(sym, " | FAILED SCALP ", typeStr, " retcode=", trade.ResultRetcode(),
-            " comment=", trade.ResultComment());
+      gFailCount++;
+      LOG("TRADE_FAIL", sym, StringFormat("%s retcode=%d comment=%s", typeStr, trade.ResultRetcode(), trade.ResultComment()));
+      for (int ss=0; ss<symCount; ss++) {
+         if (syms[ss] == sym) {
+            ts[ss].failCount++;
+            if (ts[ss].failCount >= 3) {
+               ts[ss].failUntil = TimeCurrent() + 60;
+               Print(sym, " | FAIL_BACKOFF activated, until=", ts[ss].failUntil);
+            }
+            break;
+         }
+      }
    }
    return ok;
 }
@@ -1076,10 +1222,10 @@ double calcLotByRisk(string sym, double entry, double slDist, int side) {
 
     double raw = maxRisk / riskPerLot;
     double lots = MathFloor(raw / step) * step;
-    lots = MathMax(minV, MathMin(lots, 2.0));
+    lots = MathMax(minV, MathMin(lots, gMaxLotCap));
 
     if (StringFind(sym, "XAU") >= 0 || StringFind(sym, "XAG") >= 0 || StringFind(sym, "US30") >= 0 || StringFind(sym, "UK100") >= 0) {
-       lots = MathMin(lots, 0.5);
+       lots = MathMin(lots, MathMin(gMaxLotCap, 0.5));
     }
 
     return lots;
@@ -1259,6 +1405,16 @@ bool hasPos(string sym) {
       if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic && pos.Symbol() == sym)
          return true;
    }
+   datetime from = TimeCurrent() - 5;
+   datetime to   = TimeCurrent();
+   if (HistorySelect(from, to)) {
+      for (int j = HistoryDealsTotal() - 1; j >= 0; j--) {
+         ulong t = HistoryDealGetTicket(j);
+         if (HistoryDealGetInteger(t, DEAL_MAGIC) != (int)gMagic) continue;
+         if (HistoryDealGetInteger(t, DEAL_ENTRY) != DEAL_ENTRY_OUT) continue;
+         if (HistoryDealGetString(t, DEAL_SYMBOL) == sym) return true;
+      }
+   }
    return false;
 }
 
@@ -1269,7 +1425,9 @@ void doTrail(int idx) {
    double open = pos.PriceOpen();
    double curr = pos.PriceCurrent();
    double pt   = SymbolInfoDouble(pos.Symbol(), SYMBOL_POINT);
-   double trailPts = gTrailPips * 10 * pt;
+   int    dgt  = (int)SymbolInfoInteger(pos.Symbol(), SYMBOL_DIGITS);
+   double pm   = (dgt == 3 || dgt == 5) ? 10.0 : 1.0;
+   double trailPts = gTrailPips * pm * pt;
    double slNew = sl;
    if (pos.PositionType() == POSITION_TYPE_BUY) {
       double trailFrom = open + trailPts * 1.5;
