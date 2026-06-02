@@ -816,8 +816,8 @@ void detectClosedPositions() {
        closedTrades[closedCount].sl = 0;
        closedTrades[closedCount].tp = 0;
        closedTrades[closedCount].ticket = ticket;
-       closedTrades[closedCount].closeReason = detectCloseReason(sym, closePrice, dealType);
-       closedCount++;
+        closedTrades[closedCount].closeReason = mapDealReason((ENUM_DEAL_REASON)HistoryDealGetInteger(dealTicket, DEAL_REASON));
+        closedCount++;
        for (int s2=0; s2<symCount; s2++) {
           if (syms[s2] == sym) {
              ts[s2].lastCloseTime = closeTime;
@@ -835,20 +835,22 @@ void detectClosedPositions() {
 }
 
 string detectCloseReason(string sym, double closePrice, ENUM_DEAL_TYPE dealType) {
-   for (int i = PositionsTotal() - 1; i >= 0; i--) {
-      if (!pos.SelectByIndex(i)) continue;
-      if (pos.Magic() != (int)gMagic) continue;
-      if (pos.Symbol() != sym) continue;
-      double sl = pos.StopLoss();
-      double tp = pos.TakeProfit();
-      double open = pos.PriceOpen();
-      double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
-      if (sl > 0 && MathAbs(closePrice - sl) < 3 * pt) return "SL_HIT";
-      if (tp > 0 && MathAbs(closePrice - tp) < 3 * pt) return "TP_HIT";
-      if (gBE > 0 && MathAbs(closePrice - open) < 3 * pt) return "BREAKEVEN";
-      if (gTimeStop > 0 && (TimeCurrent() - pos.Time()) >= gTimeStop) return "TIME_STOP";
+   return "UNUSED";
+}
+
+string mapDealReason(ENUM_DEAL_REASON r) {
+   switch (r) {
+      case DEAL_REASON_CLIENT:    return "MANUAL";
+      case DEAL_REASON_MOBILE:    return "MOBILE";
+      case DEAL_REASON_WEB:       return "WEB";
+      case DEAL_REASON_EXPERT:    return "EA_CLOSE";
+      case DEAL_REASON_SL:        return "SL_HIT";
+      case DEAL_REASON_TP:        return "TP_HIT";
+      case DEAL_REASON_SO:        return "STOP_OUT";
+      case DEAL_REASON_ROLLOVER:  return "ROLLOVER";
+      case DEAL_REASON_VMARGIN:   return "MARGIN";
+      default:                    return "OTHER_" + IntegerToString((int)r);
    }
-   return "MANUAL_OR_OTHER";
 }
 
 double calcTotalNetProfit() {
@@ -1063,8 +1065,9 @@ void scanSymbols() {
        if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
        if (hasPos(syms[s])) { skippedPos++; continue; }
        if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
-       if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 30) { skippedCool++; continue; }
-       if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
+        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 30) { skippedCool++; continue; }
+        if (syms[s] == "XAGUSD") { skippedCool++; continue; }
+        if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
        MqlRates r1[], r5[], r15[];
        int got1, got5, got15;
