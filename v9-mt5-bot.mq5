@@ -14,13 +14,13 @@
 //+------------------------------------------------------------------+
 //| Inputs                                                           |
 //+------------------------------------------------------------------+
-input string InpSymbols     = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,EURGBP,EURJPY,GBPJPY,XAUUSD,XAGUSD,US30,UK100";
+input string InpSymbols     = "AUTO";
 input double InpRiskPercent = 0.25;
-input int    InpMaxOpen     = 6;
+input int    InpMaxOpen     = 3;
 input int    InpMagic       = 999001;
 input double InpMinScore    = 0.70;
 input double InpMaxSpread   = 30.0;
-input int    InpCooldownSec = 5;
+input int    InpCooldownSec = 30;
 input int    InpMinSLPips   = 3;
 input int    InpMaxSLPips   = 5;
 input int    InpTimeStopSec = 45;
@@ -38,13 +38,13 @@ input int    InpLogClosedEvery = 1;
 input bool   InpScalpMode   = true;
 
 // === Hybrid detector weights (TICK_IMB + SPREAD_COMP primary) ===
-input double InpWTickImb    = 0.40;
-input double InpWSpreadComp = 0.30;
-input double InpWQuoteVel   = 0.15;
-input double InpWMicroPull  = 0.08;
-input double InpWCrossSync  = 0.04;
-input double InpWEntropy    = 0.03;
-input int    InpMinAgreeing = 2;
+input double InpWTickImb    = 0.65;
+input double InpWSpreadComp = 0.40;
+input double InpWQuoteVel   = 0.20;
+input double InpWMicroPull  = 0.12;
+input double InpWCrossSync  = 0.08;
+input double InpWEntropy    = 0.08;
+input int    InpMinAgreeing = 3;
 
 // === Kill zones (all sessions enabled by default) ===
 input bool   InpKillLondon  = true;
@@ -58,10 +58,16 @@ input int    InpKillAsianStart  = 2200;
 input int    InpKillAsianEnd    = 200;
 
 // === Risk limits ===
-input double InpDailyLossPct = 2.0;
+input double InpDailyLossPct = 0.3;
+input double InpDailyHardKill = 200.0;
+input int    InpTradePerHourMax = 4;
+input int    InpTradePerDayMax  = 15;
+input int    InpAdaptiveCooldownSec = 300;
+input double InpRecentWinRatePause = 40.0;
+input double InpMinTicksPerSecond  = 5.0;
 input bool   InpCorrelationFilter = true;
 input double InpAtrMinPips   = 2.0;
-input double InpMaxLotCap    = 0.5;
+input double InpMaxLotCap    = 0.05;
 
 // runtime overrides (config file)
 string   gSymbols;
@@ -101,6 +107,12 @@ bool     gKillAsian;
 int      gKillAsianStart;
 int      gKillAsianEnd;
 double   gDailyLossPct;
+double   gDailyHardKill;
+int      gTradePerHourMax;
+int      gTradePerDayMax;
+int      gAdaptiveCooldownSec;
+double   gRecentWinRatePause;
+double   gMinTicksPerSecond;
 bool     gCorrelationFilter;
 double   gAtrMinPips;
 string   gLockName;
@@ -113,6 +125,14 @@ int      gFailCount = 0;
 datetime gLastHourlyLog = 0;
 int      gCurrentDay = -1;
 double   gMaxLotCap;
+
+// === Trade-rate counters / monitoring ===
+int      gTradesThisHour = 0;
+int      gTradesThisDay  = 0;
+int      gConsecSlCount  = 0;
+datetime gCurrentHour    = 0;
+datetime gTradePauseUntil = 0;
+datetime gLastTradeCloseForCooldown = 0;
 
 //+------------------------------------------------------------------+
 //| Execution tracking structs                                       |
@@ -258,6 +278,136 @@ string corrGroups[][3] = {
 };
 
 //+------------------------------------------------------------------+
+//| Symbol class (used for risk-aware lot / SL / spread)             |
+//+------------------------------------------------------------------+
+enum ENUM_SYMBOL_CLASS {
+   SYM_CLASS_UNKNOWN  = 0,
+   SYM_CLASS_MAJOR_FX = 1,
+   SYM_CLASS_CROSS_FX = 2,
+   SYM_CLASS_METAL    = 3,
+   SYM_CLASS_INDEX    = 4,
+   SYM_CLASS_CRYPTO   = 5
+};
+
+struct SymbolClassConfig {
+   double maxLot;
+   int    minSLPips;
+   int    maxSLPips;
+   double maxSpreadPoints;
+   double maxRiskPct;       // effective cap on gRiskPct for this class
+   double atrMinPipsFloor;  // min ATR for class
+};
+
+ENUM_SYMBOL_CLASS getSymbolClass(string sym) {
+   string u = sym;
+   StringToUpper(u);
+   if (StringFind(u, "BTC") >= 0 || StringFind(u, "ETH") >= 0 ||
+       StringFind(u, "XRP") >= 0 || StringFind(u, "LTC") >= 0 ||
+       StringFind(u, "SOL") >= 0) return SYM_CLASS_CRYPTO;
+   if (StringFind(u, "XAU") >= 0 || StringFind(u, "XAG") >= 0 ||
+       StringFind(u, "GOLD") >= 0 || StringFind(u, "SILVER") >= 0) return SYM_CLASS_METAL;
+   if (StringFind(u, "US30") >= 0 || StringFind(u, "US500") >= 0 ||
+       StringFind(u, "US100") >= 0 || StringFind(u, "NAS") >= 0 ||
+       StringFind(u, "DE30")  >= 0 || StringFind(u, "DE40")  >= 0 ||
+       StringFind(u, "UK100") >= 0 || StringFind(u, "JP225") >= 0 ||
+       StringFind(u, "AUS200")>= 0 || StringFind(u, "FRA40") >= 0) return SYM_CLASS_INDEX;
+   if (u == "EURUSD" || u == "GBPUSD" || u == "AUDUSD" ||
+       u == "NZDUSD" || u == "USDCAD" || u == "USDCHF" ||
+       u == "USDJPY") return SYM_CLASS_MAJOR_FX;
+   if (StringFind(u, "EUR") >= 0 || StringFind(u, "GBP") >= 0 ||
+       StringFind(u, "AUD") >= 0 || StringFind(u, "NZD") >= 0 ||
+       StringFind(u, "CAD") >= 0 || StringFind(u, "CHF") >= 0 ||
+       StringFind(u, "JPY") >= 0) return SYM_CLASS_CROSS_FX;
+   return SYM_CLASS_UNKNOWN;
+}
+
+SymbolClassConfig getSymbolClassConfig(ENUM_SYMBOL_CLASS cls) {
+   SymbolClassConfig c;
+   if (cls == SYM_CLASS_MAJOR_FX) {
+      c.maxLot = 0.10; c.minSLPips = 3; c.maxSLPips = 6; c.maxSpreadPoints = 25.0;
+      c.maxRiskPct = 0.50; c.atrMinPipsFloor = 1.5;
+   } else if (cls == SYM_CLASS_CROSS_FX) {
+      c.maxLot = 0.05; c.minSLPips = 5; c.maxSLPips = 10; c.maxSpreadPoints = 35.0;
+      c.maxRiskPct = 0.40; c.atrMinPipsFloor = 2.0;
+   } else if (cls == SYM_CLASS_METAL) {
+      c.maxLot = 0.05; c.minSLPips = 15; c.maxSLPips = 30; c.maxSpreadPoints = 50.0;
+      c.maxRiskPct = 0.25; c.atrMinPipsFloor = 8.0;
+   } else if (cls == SYM_CLASS_INDEX) {
+      c.maxLot = 0.01; c.minSLPips = 100; c.maxSLPips = 200; c.maxSpreadPoints = 80.0;
+      c.maxRiskPct = 0.20; c.atrMinPipsFloor = 50.0;
+   } else if (cls == SYM_CLASS_CRYPTO) {
+      c.maxLot = 0.02; c.minSLPips = 30; c.maxSLPips = 60; c.maxSpreadPoints = 100.0;
+      c.maxRiskPct = 0.30; c.atrMinPipsFloor = 20.0;
+   } else {
+      c.maxLot = 0.05; c.minSLPips = 5; c.maxSLPips = 15; c.maxSpreadPoints = 50.0;
+      c.maxRiskPct = 0.25; c.atrMinPipsFloor = 3.0;
+   }
+   return c;
+}
+
+double getSymbolMaxLot(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).maxLot;
+}
+
+int getSymbolMinSL(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).minSLPips;
+}
+
+int getSymbolMaxSL(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).maxSLPips;
+}
+
+double getSymbolMaxSpread(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).maxSpreadPoints;
+}
+
+double getSymbolMaxRiskPct(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).maxRiskPct;
+}
+
+double getSymbolAtrFloor(string sym) {
+   return getSymbolClassConfig(getSymbolClass(sym)).atrMinPipsFloor;
+}
+
+//+------------------------------------------------------------------+
+//| Market regime detection (ADX + ATR)                              |
+//+------------------------------------------------------------------+
+enum ENUM_MARKET_REGIME {
+   REGIME_RANGING  = 0,
+   REGIME_WEAK_TR  = 1,
+   REGIME_TREND    = 2,
+   REGIME_HIGH_VOL = 3
+};
+
+ENUM_MARKET_REGIME getMarketRegime(string sym, double adxVal, double atrPips) {
+   double atrFloor = getSymbolAtrFloor(sym);
+   if (atrPips > atrFloor * 2.5) return REGIME_HIGH_VOL;
+   if (adxVal >= 25.0) return REGIME_TREND;
+   if (adxVal >= 18.0) return REGIME_WEAK_TR;
+   return REGIME_RANGING;
+}
+
+// returns 1.0 if symbol is "tradeable" in the current regime, 0.0 otherwise
+// RANGING + scalping is allowed only if ATR floor is satisfied; HIGH_VOL is blocked.
+double regimeTradeability(ENUM_SYMBOL_CLASS cls, ENUM_MARKET_REGIME regime) {
+   if (regime == REGIME_HIGH_VOL) return 0.0;
+   if (cls == SYM_CLASS_METAL) {
+      if (regime == REGIME_RANGING) return 0.5;   // metals trade poorly in flat
+      return 1.0;
+   }
+   if (cls == SYM_CLASS_INDEX) {
+      if (regime == REGIME_RANGING) return 0.0;   // indices are choppy — no scalp
+      return 1.0;
+   }
+   if (cls == SYM_CLASS_CRYPTO) {
+      if (regime == REGIME_TREND) return 1.0;
+      return 0.6;
+   }
+   if (cls == SYM_CLASS_UNKNOWN) return 0.0;     // never trade unknown class
+   return 1.0;                                    // FX majors/crosses ok in all regimes
+}
+
+//+------------------------------------------------------------------+
 //| Config file parser                                                |
 //+------------------------------------------------------------------+
 #define CONFIG_FILE "v9-config.txt"
@@ -294,7 +444,11 @@ void ReadConfig() {
     gKillLondon = InpKillLondon; gKillLondonStart = (InpKillLondonStart/100)*60 + (InpKillLondonStart%100); gKillLondonEnd = (InpKillLondonEnd/100)*60 + (InpKillLondonEnd%100);
     gKillNY = InpKillNY; gKillNYStart = (InpKillNYStart/100)*60 + (InpKillNYStart%100); gKillNYEnd = (InpKillNYEnd/100)*60 + (InpKillNYEnd%100);
     gKillAsian = InpKillAsian; gKillAsianStart = (InpKillAsianStart/100)*60 + (InpKillAsianStart%100); gKillAsianEnd = (InpKillAsianEnd/100)*60 + (InpKillAsianEnd%100);
-    gDailyLossPct = InpDailyLossPct; gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips; gMaxLotCap = InpMaxLotCap;
+    gDailyLossPct = InpDailyLossPct; gDailyHardKill = InpDailyHardKill;
+    gTradePerHourMax = InpTradePerHourMax; gTradePerDayMax = InpTradePerDayMax;
+    gAdaptiveCooldownSec = InpAdaptiveCooldownSec; gRecentWinRatePause = InpRecentWinRatePause;
+    gMinTicksPerSecond = InpMinTicksPerSecond;
+    gCorrelationFilter = InpCorrelationFilter; gAtrMinPips = InpAtrMinPips; gMaxLotCap = InpMaxLotCap;
 
    int h = FileOpen(CONFIG_FILE, FILE_TXT|FILE_READ|FILE_ANSI);
    if (h == INVALID_HANDLE) {
@@ -352,6 +506,12 @@ void ReadConfig() {
        else if (key == "KILL_ASIAN_START") gKillAsianStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
        else if (key == "KILL_ASIAN_END") gKillAsianEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
       else if (key == "DAILY_LOSS_PCT") gDailyLossPct = StringToDouble(val);
+      else if (key == "DAILY_HARD_KILL") gDailyHardKill = StringToDouble(val);
+      else if (key == "TRADE_PER_HOUR_MAX") gTradePerHourMax = (int)StringToInteger(val);
+      else if (key == "TRADE_PER_DAY_MAX")  gTradePerDayMax  = (int)StringToInteger(val);
+      else if (key == "ADAPTIVE_COOLDOWN_SEC") gAdaptiveCooldownSec = (int)StringToInteger(val);
+      else if (key == "RECENT_WINRATE_PAUSE")  gRecentWinRatePause = StringToDouble(val);
+      else if (key == "MIN_TICKS_PER_SECOND")  gMinTicksPerSecond = StringToDouble(val);
       else if (key == "CORRELATION_FILTER") gCorrelationFilter = (StringToInteger(val) != 0);
       else if (key == "ATR_MIN_PIPS") gAtrMinPips = StringToDouble(val);
       else if (key == "MAX_LOT_CAP") gMaxLotCap = StringToDouble(val);
@@ -376,9 +536,9 @@ int OnInit() {
     GlobalVariableSet(gLockName, (double)TimeCurrent());
     gLastLockRenew = TimeCurrent();
 
-   string logPath = "v9-bot-" + TimeToString(TimeCurrent(), TIME_DATE) + ".log";
-   StringReplace(logPath, ".", "");
-   logPath = StringSubstr(logPath, 0, 8) + ".log";
+   string dateStr = TimeToString(TimeCurrent(), TIME_DATE);
+   StringReplace(dateStr, ".", "");
+   string logPath = "v9-bot-" + dateStr + ".log";
    gLogHandle = FileOpen(logPath, FILE_WRITE|FILE_TXT|FILE_COMMON|FILE_SHARE_READ|FILE_ANSI);
    if (gLogHandle != INVALID_HANDLE) {
       FileWrite(gLogHandle, "--- v9-mt5-bot started " + TimeToString(TimeCurrent()) + " ---");
@@ -389,26 +549,43 @@ int OnInit() {
       Print("LOG_FILE_FAIL err=", GetLastError(), " (file logging disabled)");
    }
 
-    Print("=== OnInit START ===");
-    ReadConfig();
-   trade.SetExpertMagicNumber((int)gMagic);
-   string parts[];
-   int n = StringSplit(gSymbols, ',', parts);
-   symCount = n;
-   ArrayResize(syms, n);
-   ArrayResize(ts, n);
-   ArrayResize(symSt, n);
-   for (int i = 0; i < n; i++) {
-      syms[i] = parts[i];
-      ts[i].symbol = parts[i];
-      ts[i].head = 0; ts[i].count = 0; ts[i].curSec = 0;
-      ts[i].ticking = false; ts[i].lastSignalTime = 0;
-      symSt[i].tickHead = 0; symSt[i].tickCount = 0;
-      symSt[i].spreadHead = 0; symSt[i].spreadCount = 0;
-      symSt[i].lastSpread = 0; symSt[i].lastTickTime = 0;
-      symSt[i].ticksPerSecond = 0; symSt[i].lastVelocity = 0;
-      symSt[i].lastImpulseTime = 0; symSt[i].impulseDir = 0;
-   }
+     Print("=== OnInit START ===");
+     ReadConfig();
+    trade.SetExpertMagicNumber((int)gMagic);
+    int n = 0;
+    string parts[];
+
+    if (gSymbols == "AUTO" || gSymbols == "auto") {
+       Print("SYMBOLS=AUTO detected — pulling all MarketWatch symbols via SymbolsTotal(true)");
+       n = SymbolsTotal(true);
+       ArrayResize(parts, n);
+       for (int i = 0; i < n; i++) {
+          parts[i] = SymbolName(i, true);
+          ENUM_SYMBOL_CLASS cls = getSymbolClass(parts[i]);
+          Print("  AUTO[", i, "] ", parts[i], " class=", cls, " (maxLot=", getSymbolMaxLot(parts[i]),
+                " sl=", getSymbolMinSL(parts[i]), "-", getSymbolMaxSL(parts[i]), "p)");
+       }
+    } else {
+       n = StringSplit(gSymbols, ',', parts);
+    }
+
+    symCount = n;
+    ArrayResize(syms, n);
+    ArrayResize(ts, n);
+    ArrayResize(symSt, n);
+    for (int i = 0; i < n; i++) {
+       syms[i] = parts[i];
+       ts[i].symbol = parts[i];
+       ts[i].head = 0; ts[i].count = 0; ts[i].curSec = 0;
+       ts[i].ticking = false; ts[i].lastSignalTime = 0;
+       ts[i].lastCloseTime = 0; ts[i].lastCloseSide = 0;
+       ts[i].failCount = 0; ts[i].failUntil = 0;
+       symSt[i].tickHead = 0; symSt[i].tickCount = 0;
+       symSt[i].spreadHead = 0; symSt[i].spreadCount = 0;
+       symSt[i].lastSpread = 0; symSt[i].lastTickTime = 0;
+       symSt[i].ticksPerSecond = 0; symSt[i].lastVelocity = 0;
+       symSt[i].lastImpulseTime = 0; symSt[i].impulseDir = 0;
+    }
     Print("BEFORE_TIMER timerMs=", timerMs);
     bool timerOk = EventSetMillisecondTimer(timerMs);
     Print("AFTER_TIMER ok=", timerOk, " timerMs=", timerMs);
@@ -827,10 +1004,27 @@ void detectClosedPositions() {
              break;
           }
        }
-       lastClosedTicket = ticket;
-       dailyNetProfit += net;
-       LOG("TRADE_CLOSE", sym, StringFormat("%s profit=%.2f comm=%.2f swap=%.2f net=%.2f reason=%s ticket=%d",
-             typeStr, profit, comm, swap, net, closedTrades[closedCount-1].closeReason, ticket));
+        lastClosedTicket = ticket;
+        dailyNetProfit += net;
+
+        // consecutive SL tracking + adaptive cooldown trigger
+        string reason = closedTrades[closedCount-1].closeReason;
+        if (reason == "SL_HIT") {
+           gConsecSlCount++;
+           if (gConsecSlCount >= 2) {
+              gTradePauseUntil = MathMax(gTradePauseUntil, (datetime)(TimeCurrent() + gAdaptiveCooldownSec));
+              LOG("ADAPTIVE_COOLDOWN", "ALL", StringFormat("consecSL=%d, pause until %s",
+                    gConsecSlCount, TimeToString(gTradePauseUntil)));
+           }
+        } else {
+           gConsecSlCount = 0;
+        }
+
+        LOG("TRADE_CLOSE", sym, StringFormat("%s profit=%.2f comm=%.2f swap=%.2f net=%.2f reason=%s ticket=%d",
+              typeStr, profit, comm, swap, net, reason, ticket));
+
+        // recent win rate pause (only after 10+ closed trades)
+        checkRecentWinRatePause();
     }
 }
 
@@ -859,6 +1053,29 @@ double calcTotalNetProfit() {
    return total;
 }
 
+// returns win rate (%) of the last N closed trades (0 if no data)
+double recentWinRate(int lastN) {
+   if (closedCount == 0) return 100.0;
+   int win = 0, total = 0;
+   int start = MathMax(0, closedCount - lastN);
+   for (int i = start; i < closedCount; i++) {
+      total++;
+      if (closedTrades[i].netProfit > 0) win++;
+   }
+   if (total == 0) return 100.0;
+   return (100.0 * win) / total;
+}
+
+void checkRecentWinRatePause() {
+   if (closedCount < 10) return;
+   double wr = recentWinRate(20);
+   if (wr < gRecentWinRatePause && gTradePauseUntil < TimeCurrent()) {
+      gTradePauseUntil = TimeCurrent() + 3600;
+      LOG("PAUSE", "ALL", StringFormat("winRate=%.1f%% < %.1f%%, paused for 1h until %s",
+            wr, gRecentWinRatePause, TimeToString(gTradePauseUntil)));
+   }
+}
+
 //+------------------------------------------------------------------+
 //| Timer: main loop every 50ms                                      |
 //+------------------------------------------------------------------+
@@ -875,7 +1092,26 @@ void OnTimer() {
    if (gCurrentDay != dtNow.day_of_year) {
       gCurrentDay = dtNow.day_of_year;
       dailyNetProfit = 0;
-      LOG("DAILY_RESET", "ALL", "dailyNetProfit=0");
+      gTradesThisDay = 0;
+      gConsecSlCount = 0;
+      gTradePauseUntil = 0;
+      LOG("DAILY_RESET", "ALL", "dailyNetProfit=0 tradesDay=0 consecSL=0");
+   }
+
+   // hourly reset
+   datetime thisHour = (TimeCurrent() / 3600) * 3600;
+   if (gCurrentHour != thisHour) {
+      gCurrentHour = thisHour;
+      gTradesThisHour = 0;
+   }
+
+   // ticks-per-second update for each symbol
+   for (int s = 0; s < symCount; s++) {
+      if (symSt[s].lastTickTime > 0) {
+         int dt = (int)(TimeCurrent() - symSt[s].lastTickTime);
+         if (dt > 0 && dt <= 5) symSt[s].ticksPerSecond++;
+         else if (dt > 5) symSt[s].ticksPerSecond = 0;
+      }
    }
 
    if (TimeCurrent() - gLastHourlyLog >= 3600) {
@@ -1052,99 +1288,152 @@ void scanSymbols() {
        if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
        return;
     }
+    if (gTradePauseUntil > TimeCurrent()) {
+       if (tickCount % gLogEvery == 0)
+          Print("=== TRADE PAUSE — waiting until ", gTradePauseUntil, " (", (gTradePauseUntil - TimeCurrent()), "s) ===");
+       return;
+    }
+    if (gTradesThisHour >= gTradePerHourMax) {
+       if (tickCount % gLogEvery == 0) Print("=== HOURLY TRADE LIMIT HIT (", gTradesThisHour, "/", gTradePerHourMax, ") — waiting next hour ===");
+       return;
+    }
+    if (gTradesThisDay >= gTradePerDayMax) {
+       if (tickCount % gLogEvery == 0) Print("=== DAILY TRADE LIMIT HIT (", gTradesThisDay, "/", gTradePerDayMax, ") — pausing for today ===");
+       return;
+    }
+    if (dailyNetProfit <= -gDailyHardKill) {
+       if (tickCount % gLogEvery == 0) Print("=== DAILY HARD KILL (", dailyNetProfit, " <= -", gDailyHardKill, ") — no more trades today ===");
+       return;
+    }
 
     int openCount = 0;
     for (int i = PositionsTotal() - 1; i >= 0; i--) {
        if (pos.SelectByIndex(i) && pos.Magic() == (int)gMagic) openCount++;
     }
 
-    int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0;
+    int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0, skippedClass = 0, skippedRegime = 0, skippedTPS = 0;
 
      for (int s = 0; s < symCount; s++) {
        if (openCount + placed >= gMaxOpen) break;
+
+       ENUM_SYMBOL_CLASS cls = getSymbolClass(syms[s]);
+       if (cls == SYM_CLASS_UNKNOWN) { skippedClass++; continue; }
+
+       // ticks-per-second guard (low liquidity = unreliable signals)
+       if (symSt[s].ticksPerSecond > 0 && symSt[s].ticksPerSecond < gMinTicksPerSecond) { skippedTPS++; continue; }
+
        if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
        if (hasPos(syms[s])) { skippedPos++; continue; }
        if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
         if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) { skippedCool++; continue; }
-        if (syms[s] == "XAGUSD" || syms[s] == "XAUUSD") { skippedCool++; continue; }
         if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
-       MqlRates r1[], r5[], r15[];
-       int got1, got5, got15;
-       if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
-          noSig++; continue;
-       }
+        // anti-flip: same direction as the most recent close on the same symbol → block
+        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 600) { skippedCool++; continue; }
 
-       double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
-       double maxSpreadPoints = gMaxSpread * 10.0;
-       if (sp > maxSpreadPoints) { skippedSpread++; continue; }
+        MqlRates r1[], r5[], r15[];
+        int got1, got5, got15;
+        if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
+           noSig++; continue;
+        }
 
-       double atr = calcAtr(r1, got1, 14);
-       double minAtr = gAtrMinPips * 10 * SymbolInfoDouble(syms[s], SYMBOL_POINT);
-       if (atr < minAtr) { noSig++; continue; }
+        double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
+        SymbolClassConfig clsCfg = getSymbolClassConfig(cls);
+        if (sp > clsCfg.maxSpreadPoints) { skippedSpread++; continue; }
 
-       HybridSignal sig;
-       if (getHybridSignal(s, sig)) {
-          if (tickCount % gLogEvery == 0)
-             Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
-                   " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
-                   " spreadComp=", DoubleToString(calcSpreadCompression(s), 2));
-          if (execScalpTrade(syms[s], sig)) {
-             ts[s].lastSignalTime = TimeCurrent();
-             placed++;
-          }
-       } else {
-          noSig++;
-          if (tickCount % gLogEvery == 0) {
-             double imb2 = calcTickImbalance(s);
-             double sc2 = calcSpreadCompression(s);
-             double vl2 = calcQuoteVelocity(s);
-             double pl2 = calcMicroPullback(s);
-             double sy2 = calcCrossSync(s);
-             double en2 = calcTickEntropy(s);
-             int agree = 0;
-             if (imb2 > 0) agree++;
-             if (sc2 > 0) agree++;
-             if (vl2 > 0) agree++;
-             if (pl2 > 0) agree++;
-             if (sy2 > 0) agree++;
-             if (en2 > 0) agree++;
-             Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
-                   " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
-                   " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
-                   " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2));
-          }
-       }
-    }
+        double atr = calcAtr(r1, got1, 14);
+        double pt  = SymbolInfoDouble(syms[s], SYMBOL_POINT);
+        int    dgt = (int)SymbolInfoInteger(syms[s], SYMBOL_DIGITS);
+        double pipMult = (dgt == 3 || dgt == 5) ? 10.0 : 1.0;
+        double atrPips = (pt > 0) ? (atr / pt / pipMult) : 0;
+        if (atrPips < MathMax(gAtrMinPips, clsCfg.atrMinPipsFloor)) { noSig++; continue; }
+
+        // regime check
+        double adxM5 = calcAdx(r5, got5, 14);
+        ENUM_MARKET_REGIME regime = getMarketRegime(syms[s], adxM5, atrPips);
+        double tradeability = regimeTradeability(cls, regime);
+        if (tradeability <= 0.0) { skippedRegime++; continue; }
+
+        HybridSignal sig;
+        if (getHybridSignal(s, sig)) {
+           if (tickCount % gLogEvery == 0)
+              Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
+                    " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
+                    " spreadComp=", DoubleToString(calcSpreadCompression(s), 2),
+                    " regime=", regime, " tradeability=", DoubleToString(tradeability, 2));
+           if (execScalpTrade(s, syms[s], sig, cls, clsCfg)) {
+              ts[s].lastSignalTime = TimeCurrent();
+              placed++;
+              gTradesThisHour++;
+              gTradesThisDay++;
+           }
+        } else {
+           noSig++;
+           if (tickCount % gLogEvery == 0) {
+              double imb2 = calcTickImbalance(s);
+              double sc2 = calcSpreadCompression(s);
+              double vl2 = calcQuoteVelocity(s);
+              double pl2 = calcMicroPullback(s);
+              double sy2 = calcCrossSync(s);
+              double en2 = calcTickEntropy(s);
+              int agree = 0;
+              if (imb2 > 0) agree++;
+              if (sc2 > 0) agree++;
+              if (vl2 > 0) agree++;
+              if (pl2 > 0) agree++;
+              if (sy2 > 0) agree++;
+              if (en2 > 0) agree++;
+              Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
+                    " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
+                    " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
+                    " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2),
+                    " regime=", regime, " tps=", symSt[s].ticksPerSecond);
+           }
+        }
+     }
 
     if (tickCount % gLogEvery == 0)
        Print("=== SCAN | open=", openCount, " placed=", placed,
              " hasPos=", skippedPos, " cooldown=", skippedCool,
-             " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig);
+             " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig,
+             " class=", skippedClass, " regime=", skippedRegime, " tps=", skippedTPS,
+             " | hour=", gTradesThisHour, "/", gTradePerHourMax, " day=", gTradesThisDay, "/", gTradePerDayMax);
 }
 
 //+------------------------------------------------------------------+
 //| Scalp trade execution                                            |
 //+------------------------------------------------------------------+
-bool execScalpTrade(string sym, HybridSignal &sig) {
+bool execScalpTrade(int s, string sym, HybridSignal &sig, ENUM_SYMBOL_CLASS cls, SymbolClassConfig &clsCfg) {
    double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
    double bid = SymbolInfoDouble(sym, SYMBOL_BID);
    double price = (sig.side == 1) ? ask : bid;
    double pt    = SymbolInfoDouble(sym, SYMBOL_POINT);
    int    digits= (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
    double pipMult = (digits == 3 || digits == 5) ? 10.0 : 1.0;
-   double minSL = gMinSL * pipMult * pt;
-   double maxSL = gMaxSL * pipMult * pt;
+   // SL band is class-based, not global
+   double minSLDist = MathMax(gMinSL, clsCfg.minSLPips) * pipMult * pt;
+   double maxSLDist = MathMax(gMaxSL, clsCfg.maxSLPips) * pipMult * pt;
 
-   double slDist = maxSL;
+   double slDist = maxSLDist;
+   double slPips = (double)clsCfg.maxSLPips;
    MqlRates rTmp[];
    int gotTmp = CopyRates(sym, PERIOD_M1, 1, 30, rTmp);
    if (gotTmp >= 20) {
       double atrVal = calcAtr(rTmp, gotTmp, 14);
-      double atrPips = (pt > 0) ? (atrVal / pt / pipMult) : gMaxSL;
-      slDist = MathMin(maxSL, MathMax(minSL, atrPips * 0.5));
+      slPips = (pt > 0) ? (atrVal / pt / pipMult * 0.5) : slPips;
+      slDist = slPips * pipMult * pt;
    }
-   double lots = calcLotByRisk(sym, price, slDist, sig.side);
+   if (slDist < minSLDist) slDist = minSLDist;
+   if (slDist > maxSLDist) slDist = maxSLDist;
+   slPips = slDist / pt / pipMult;
+
+   // effective SL guard — never enter with a sub-2-pip stop
+   if (slPips < 2.0) {
+      LOG("TRADE_SKIPPED", sym, StringFormat("effectiveSL=%.1f pips below 2 pip floor (class=%d)", slPips, (int)cls));
+      return false;
+   }
+
+   double lots = calcLotByRisk(sym, price, slDist, sig.side, clsCfg);
    if (lots < SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN)) return false;
 
    double sl = (sig.side == 1) ? price - slDist : price + slDist;
@@ -1160,8 +1449,8 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
       double fillPrice = trade.ResultPrice();
       double slippage = MathAbs(fillPrice - price);
       gTradeCount++;
-      LOG("TRADE_OPEN", sym, StringFormat("%s %s score=%.2f lots=%.2f req=%.5f fill=%.5f slip=%.5f sl=%.5f tp=%.5f ticket=%d",
-            typeStr, sig.name, sig.score, lots, price, fillPrice, slippage, sl, tp, trade.ResultOrder()));
+      LOG("TRADE_OPEN", sym, StringFormat("%s %s score=%.2f lots=%.2f req=%.5f fill=%.5f slip=%.5f slPips=%.1f tpPips=%.1f class=%d ticket=%d",
+            typeStr, sig.name, sig.score, lots, price, fillPrice, slippage, slPips, slPips*1.5, (int)cls, trade.ResultOrder()));
       if (gTrackExecution) {
          if (execCount >= ArraySize(execHistory)) ArrayResize(execHistory, execCount + 100);
          execHistory[execCount].time = TimeCurrent();
@@ -1178,36 +1467,27 @@ bool execScalpTrade(string sym, HybridSignal &sig) {
          execHistory[execCount].slippage = slippage;
          execCount++;
       }
-      for (int ss=0; ss<symCount; ss++) {
-         if (syms[ss] == sym) {
-            ts[ss].failCount = 0;
-            ts[ss].failUntil = 0;
-            break;
-         }
-      }
+      ts[s].failCount = 0;
+      ts[s].failUntil = 0;
       lastTradeTime = TimeCurrent();
    } else {
       gFailCount++;
       LOG("TRADE_FAIL", sym, StringFormat("%s retcode=%d comment=%s", typeStr, trade.ResultRetcode(), trade.ResultComment()));
-      for (int ss=0; ss<symCount; ss++) {
-         if (syms[ss] == sym) {
-            ts[ss].failCount++;
-            if (ts[ss].failCount >= 3) {
-               ts[ss].failUntil = TimeCurrent() + 60;
-               Print(sym, " | FAIL_BACKOFF activated, until=", ts[ss].failUntil);
-            }
-            break;
-         }
+      ts[s].failCount++;
+      if (ts[s].failCount >= 3) {
+         ts[s].failUntil = TimeCurrent() + 60;
+         Print(sym, " | FAIL_BACKOFF activated, until=", ts[s].failUntil);
       }
    }
    return ok;
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size                                               |
+//| Calculate lot size (class-aware, capped by class max lot)        |
 //+------------------------------------------------------------------+
-double calcLotByRisk(string sym, double entry, double slDist, int side) {
-    double maxRisk = acc.Balance() * (gRiskPct / 100.0);
+double calcLotByRisk(string sym, double entry, double slDist, int side, SymbolClassConfig &clsCfg) {
+    double effectiveRiskPct = MathMin(gRiskPct, clsCfg.maxRiskPct);
+    double maxRisk = acc.Balance() * (effectiveRiskPct / 100.0);
     double minV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
     double maxV = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
     double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
@@ -1231,11 +1511,7 @@ double calcLotByRisk(string sym, double entry, double slDist, int side) {
 
     double raw = maxRisk / riskPerLot;
     double lots = MathFloor(raw / step) * step;
-    lots = MathMax(minV, MathMin(lots, gMaxLotCap));
-
-    if (StringFind(sym, "XAU") >= 0 || StringFind(sym, "XAG") >= 0 || StringFind(sym, "US30") >= 0 || StringFind(sym, "UK100") >= 0) {
-       lots = MathMin(lots, MathMin(gMaxLotCap, 0.5));
-    }
+    lots = MathMax(minV, MathMin(lots, MathMin(clsCfg.maxLot, gMaxLotCap)));
 
     return lots;
 }
@@ -1480,10 +1756,16 @@ void drawComment() {
    } else {
       logStatus = "Log: FAILED (see Experts)";
    }
+   double wr20 = recentWinRate(20);
+   string pauseStr = "";
+   if (gTradePauseUntil > TimeCurrent()) {
+      pauseStr = StringFormat(" | PAUSE:%ds", (int)(gTradePauseUntil - TimeCurrent()));
+   }
    string txt = StringFormat(
-      "v9-mt5-bot v3.00 SCALP | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f\nDaily: %.2f | KillZone: %s | Risk: %.2f%%\n%s | Scans:%d Sig:%d Trade:%d Fail:%d",
-      open, gMaxOpen, totalPnL, acc.Balance(), calcTotalNetProfit(), avgSlippage,
+      "v9-mt5-bot v3.00 SCALP | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f | WR20: %.1f%%\nDaily: %.2f | KZ: %s | Risk: %.2f%%\nHour: %d/%d Day: %d/%d | ConsSL: %d%s\n%s | Scans:%d Sig:%d Trade:%d Fail:%d",
+      open, gMaxOpen, totalPnL, acc.Balance(), calcTotalNetProfit(), avgSlippage, wr20,
       dailyNetProfit, (isKillZoneActive() ? "ON" : "OFF"), gRiskPct,
+      gTradesThisHour, gTradePerHourMax, gTradesThisDay, gTradePerDayMax, gConsecSlCount, pauseStr,
       logStatus, gScanCount, gSignalCount, gTradeCount, gFailCount);
    Comment(txt);
 }
