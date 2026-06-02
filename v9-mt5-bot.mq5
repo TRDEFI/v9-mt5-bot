@@ -376,14 +376,18 @@ int OnInit() {
     GlobalVariableSet(gLockName, (double)TimeCurrent());
     gLastLockRenew = TimeCurrent();
 
-    gLogHandle = FileOpen("v9-bot.log", FILE_WRITE|FILE_TXT);
-    if (gLogHandle != INVALID_HANDLE) {
-       FileWrite(gLogHandle, "--- v9-mt5-bot started " + TimeToString(TimeCurrent()) + " ---");
-       FileFlush(gLogHandle);
-       Print("LOG_FILE_OK handle=", gLogHandle);
-    } else {
-       Print("LOG_FILE_FAIL err=", GetLastError(), " (file logging disabled)");
-    }
+   string logPath = "v9-bot-" + TimeToString(TimeCurrent(), TIME_DATE) + ".log";
+   StringReplace(logPath, ".", "");
+   logPath = StringSubstr(logPath, 0, 8) + ".log";
+   gLogHandle = FileOpen(logPath, FILE_WRITE|FILE_TXT|FILE_COMMON|FILE_SHARE_READ|FILE_ANSI);
+   if (gLogHandle != INVALID_HANDLE) {
+      FileWrite(gLogHandle, "--- v9-mt5-bot started " + TimeToString(TimeCurrent()) + " ---");
+      FileWrite(gLogHandle, "log_path=" + logPath + " (Common/Files)");
+      FileFlush(gLogHandle);
+      Print("LOG_FILE_OK handle=", gLogHandle, " path=", logPath);
+   } else {
+      Print("LOG_FILE_FAIL err=", GetLastError(), " (file logging disabled)");
+   }
 
     Print("=== OnInit START ===");
     ReadConfig();
@@ -417,9 +421,10 @@ int OnInit() {
    Print("Hybrid: TICK_IMB=", DoubleToString(gWTickImb,2), " SPREAD_COMP=", DoubleToString(gWSpreadComp,2),
          " QUOTE_VEL=", DoubleToString(gWQuoteVel,2), " MICRO_PULL=", DoubleToString(gWMicroPull,2),
          " CROSS_SYNC=", DoubleToString(gWCrossSync,2), " ENTROPY=", DoubleToString(gWEntropy,2));
-    Comment("v9-mt5-bot v3.00 SCALP\n", n, " symbols | risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, "p");
-    Print("=== OnInit END ===");
-    return INIT_SUCCEEDED;
+   Print("LOG_PATH ", logPath, " handle=", gLogHandle);
+   drawComment();
+   Print("=== OnInit END ===");
+   return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
