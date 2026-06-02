@@ -376,12 +376,13 @@ int OnInit() {
     GlobalVariableSet(gLockName, (double)TimeCurrent());
     gLastLockRenew = TimeCurrent();
 
-    gLogHandle = FileOpen("v9-bot.log", FILE_WRITE|FILE_TAIL|FILE_ANSI);
+    gLogHandle = FileOpen("v9-bot.log", FILE_WRITE|FILE_TXT);
     if (gLogHandle != INVALID_HANDLE) {
        FileWrite(gLogHandle, "--- v9-mt5-bot started " + TimeToString(TimeCurrent()) + " ---");
-       Print("LOG_FILE_OK: v9-bot.log opened, handle=", gLogHandle);
+       FileFlush(gLogHandle);
+       Print("LOG_FILE_OK handle=", gLogHandle);
     } else {
-       Print("LOG_FILE_FAIL: GetLastError=", GetLastError(), " — file logging disabled");
+       Print("LOG_FILE_FAIL err=", GetLastError(), " (file logging disabled)");
     }
 
     Print("=== OnInit START ===");
@@ -1464,10 +1465,18 @@ void drawComment() {
       for (int i = 0; i < execCount; i++) totalSlip += execHistory[i].slippage;
       avgSlippage = totalSlip / execCount;
    }
+   string logStatus;
+   if (gLogHandle != INVALID_HANDLE) {
+      long fsize = FileSize(gLogHandle);
+      logStatus = StringFormat("Log: OK (%d bytes)", (int)fsize);
+   } else {
+      logStatus = "Log: FAILED (see Experts)";
+   }
    string txt = StringFormat(
-      "v9-mt5-bot v3.00 SCALP | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f\nDaily: %.2f | KillZone: %s | Risk: %.2f%%",
+      "v9-mt5-bot v3.00 SCALP | Open: %d/%d | PnL: %.2f | Bal: %.2f\nNet Closed: %.2f | Avg Slip: %.5f\nDaily: %.2f | KillZone: %s | Risk: %.2f%%\n%s | Scans:%d Sig:%d Trade:%d Fail:%d",
       open, gMaxOpen, totalPnL, acc.Balance(), calcTotalNetProfit(), avgSlippage,
-      dailyNetProfit, (isKillZoneActive() ? "ON" : "OFF"), gRiskPct);
+      dailyNetProfit, (isKillZoneActive() ? "ON" : "OFF"), gRiskPct,
+      logStatus, gScanCount, gSignalCount, gTradeCount, gFailCount);
    Comment(txt);
 }
 //+------------------------------------------------------------------+
