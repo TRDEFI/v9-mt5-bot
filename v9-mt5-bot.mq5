@@ -193,7 +193,7 @@ int      processedCount = 0;
 //+------------------------------------------------------------------+
 #define MAX_TICK_BUF 100
 #define SCAN_BATCH_SIZE 10
-#define BUILD_NUMBER 15
+#define BUILD_NUMBER 16
 
 struct TickSample {
    double bid;
@@ -1314,11 +1314,7 @@ void scanSymbols() {
           Print("=== TRADE PAUSE — waiting until ", gTradePauseUntil, " (", (gTradePauseUntil - TimeCurrent()), "s) ===");
        return;
     }
-    if (gTradesThisHour >= gTradePerHourMax) {
-       if (tickCount % gLogEvery == 0) Print("=== HOURLY TRADE LIMIT HIT (", gTradesThisHour, "/", gTradePerHourMax, ") — waiting next hour ===");
-       return;
-    }
-    if (gTradesThisDay >= gTradePerDayMax) {
+     if (gTradesThisDay >= gTradePerDayMax) {
        if (tickCount % gLogEvery == 0) Print("=== DAILY TRADE LIMIT HIT (", gTradesThisDay, "/", gTradePerDayMax, ") — pausing for today ===");
        return;
     }
@@ -1425,7 +1421,7 @@ void scanSymbols() {
               " hasPos=", skippedPos, " cooldown=", skippedCool,
               " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig,
               " class=", skippedClass, " regime=", skippedRegime, " tps=", skippedTPS,
-              " | hour=", gTradesThisHour, "/", gTradePerHourMax, " day=", gTradesThisDay, "/", gTradePerDayMax);
+               " | hour=", gTradesThisHour, " day=", gTradesThisDay, "/", gTradePerDayMax);
 }
 
 //+------------------------------------------------------------------+
