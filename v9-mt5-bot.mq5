@@ -126,6 +126,7 @@ datetime gLastHourlyLog = 0;
 int      gCurrentDay = -1;
 double   gMaxLotCap;
 int      gScanIndex = 0;
+int      gTickIndex = 0;
 
 // === Trade-rate counters / monitoring ===
 int      gTradesThisHour = 0;
@@ -1137,18 +1138,21 @@ void OnTimer() {
             gScanCount, gSignalCount, gTradeCount, gFailCount, dailyNetProfit));
    }
 
-    // 1. feed ticks for all symbols
-    for (int s = 0; s < symCount; s++)
-       feedTickData(s);
+     // 1. feed ticks for current batch (round-robin, 10/tick = 500ms full cycle)
+     for (int b = 0; b < SCAN_BATCH_SIZE && gTickIndex < symCount; b++) {
+        feedTickData(gTickIndex);
+        gTickIndex++;
+     }
+     if (gTickIndex >= symCount) gTickIndex = 0;
 
-   // 2. finalize completed seconds (legacy 1s klines)
-   finalizeSecs();
+    // 2. finalize completed seconds (legacy 1s klines)
+    finalizeSecs();
 
-   // 3. manage open positions (trail, breakeven, time stop)
-   managePositions();
+    // 3. manage open positions (trail, breakeven, time stop)
+    managePositions();
 
-   // 4. scan for signals (every 200ms)
-   if (GetTickCount() - lastScanTime >= scanIntervalMs) {
+    // 4. scan for signals (every 50ms — batch of 10)
+    if (GetTickCount() - lastScanTime >= scanIntervalMs) {
       lastScanTime = GetTickCount();
       gScanCount++;
       if (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) ||
