@@ -458,8 +458,8 @@ void ReadConfig() {
    Print("Reading ", CONFIG_FILE);
    while (!FileIsEnding(h)) {
       string line = FileReadString(h);
-      line = StringReplace(line, "\r", "");
-      line = StringReplace(line, "\n", "");
+      StringReplace(line, "\r", "");
+      StringReplace(line, "\n", "");
       Trim(line);
       if (StringLen(line) == 0) continue;
       if (StringFind(line, ";") == 0) continue;
