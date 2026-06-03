@@ -262,8 +262,8 @@ TickState ts[];
 SymbolState symSt[];
 
 datetime lastScanTime;
-int      timerMs = 50;
-int      scanIntervalMs = 50;
+int      timerMs = 200;
+int      scanIntervalMs = 200;
 int      tickCount = 0;
 int      snapCounter = 0;
 double   dailyNetProfit = 0;
