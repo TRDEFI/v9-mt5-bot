@@ -1,15 +1,16 @@
-; v9-mt5-bot configuration template v3.00 SCALPING
+; v9-mt5-bot configuration template v3.01 SCALPING
 ; Copy this file to MT5/MQL5/Files/v9-config.txt and edit as needed
 ; All values shown are examples — adjust for your broker/account
+; NOTE: semicolon-prefixed lines are comments (ignored), uncomment to override defaults
 
 ; === Core ===
-;SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF,EURGBP,EURJPY,GBPJPY,XAUUSD,XAGUSD,US30,UK100
+;SYMBOLS=AUTO
 ;RISK_PCT=0.25
-;MAX_OPEN=6
+;MAX_OPEN=3
 ;MAGIC=999001
 ;MIN_SCORE=0.70
 ;MAX_SPREAD=30.0
-;COOLDOWN_SEC=5
+;COOLDOWN_SEC=30
 ;MIN_SL_PIPS=3
 ;MAX_SL_PIPS=5
 ;TIME_STOP_SEC=45
@@ -26,14 +27,14 @@
 ; === Scalping Mode ===
 ;SCALP_MODE=true
 
-; === Hybrid Detector Weights (TICK_IMB + SPREAD_COMP primary) ===
-;W_TICK_IMB=0.40
-;W_SPREAD_COMP=0.30
-;W_QUOTE_VEL=0.15
-;W_MICRO_PULL=0.08
-;W_CROSS_SYNC=0.04
-;W_ENTROPY=0.03
-;MIN_AGREEING=2
+; === Hybrid Detector Weights ===
+;W_TICK_IMB=0.65
+;W_SPREAD_COMP=0.40
+;W_QUOTE_VEL=0.20
+;W_MICRO_PULL=0.12
+;W_CROSS_SYNC=0.08
+;W_ENTROPY=0.08
+;MIN_AGREEING=3
 
 ; === Kill Zones (GMT minutes from 00:00) ===
 ;KILL_LONDON=true
@@ -47,6 +48,13 @@
 ;KILL_ASIAN_END=200
 
 ; === Risk Limits ===
-;DAILY_LOSS_PCT=2.0
+;DAILY_LOSS_PCT=0.3
+;DAILY_HARD_KILL=200.0
+;TRADE_PER_HOUR_MAX=4
+;TRADE_PER_DAY_MAX=15
+;ADAPTIVE_COOLDOWN_SEC=300
+;RECENT_WINRATE_PAUSE=40.0
+;MIN_TICKS_PER_SECOND=5.0
 ;CORRELATION_FILTER=true
 ;ATR_MIN_PIPS=2.0
+;MAX_LOT_CAP=0.05

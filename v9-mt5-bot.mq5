@@ -877,13 +877,13 @@ bool getHybridSignal(int s, HybridSignal &out) {
    }
 
     int requiredAgree = gMinAgreeing;
-    if (gScalpMode) requiredAgree = MathMax(requiredAgree, 3);
+    if (gScalpMode) requiredAgree = MathMax(requiredAgree, 2);
 
     if (agreeing < requiredAgree || side == 0) {
        int mtfSide = 0;
        double mtfScore = calcMtfSignal(s, mtfSide);
        if (mtfScore > 0 && mtfSide != 0) {
-          if (gScalpMode && mtfScore < 0.80) return false;
+          if (gScalpMode && mtfScore < 0.70) return false;
           double adjMtf = mtfScore;
           if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) {
              if (ts[s].lastCloseSide == mtfSide) {
@@ -906,7 +906,7 @@ bool getHybridSignal(int s, HybridSignal &out) {
        if (gScalpMode) {
           int mtfSide = 0;
           double mtfScore = calcMtfSignal(s, mtfSide);
-          if (mtfScore >= 0.80 && mtfSide != 0) {
+          if (mtfScore >= 0.70 && mtfSide != 0) {
              out.name = "MTF_SCALP_STRICT";
              out.score = mtfScore;
              out.side = mtfSide;
