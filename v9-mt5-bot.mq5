@@ -193,6 +193,7 @@ int      processedCount = 0;
 //+------------------------------------------------------------------+
 #define MAX_TICK_BUF 100
 #define SCAN_BATCH_SIZE 10
+#define BUILD_NUMBER 14
 
 struct TickSample {
    double bid;
@@ -611,7 +612,7 @@ int OnInit() {
        Print("TIMER_FAILED — falling back to EventSetTimer(1)");
        EventSetTimer(1);
     }
-    Print("v9-mt5-bot v3.00 SCALPING ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
+    Print("v9-mt5-bot v3.00 build ", BUILD_NUMBER, " SCALPING ready — ", n, " symbols, magic=", gMagic, " timer=", timerMs, "ms");
    Print("Mode: ", (gScalpMode ? "SCALP" : "NORMAL"), " | Risk: ", gRiskPct, "% | SL: ", gMinSL, "-", gMaxSL, " pips");
    Print("Hybrid: TICK_IMB=", DoubleToString(gWTickImb,2), " SPREAD_COMP=", DoubleToString(gWSpreadComp,2),
          " QUOTE_VEL=", DoubleToString(gWQuoteVel,2), " MICRO_PULL=", DoubleToString(gWMicroPull,2),
