@@ -429,6 +429,14 @@ void Trim(string &s) {
       s = StringSubstr(s, start, end - start);
 }
 
+bool configBool(string val) {
+   int v = (int)StringToInteger(val);
+   if (v != 0) return true;
+   string low = val;
+   StringToLower(low);
+   return (low == "true" || low == "yes" || low == "on");
+}
+
 void ReadConfig() {
     gSymbols = InpSymbols; gRiskPct = InpRiskPercent; gMaxOpen = InpMaxOpen; gMagic = (long)InpMagic;
     gMinScore = InpMinScore; gMaxSpread = InpMaxSpread;
@@ -480,15 +488,15 @@ void ReadConfig() {
       else if (key == "MAX_SL_PIPS") gMaxSL = (int)StringToInteger(val);
       else if (key == "TIME_STOP_SEC") gTimeStop = (int)StringToInteger(val);
       else if (key == "BREAKEVEN_PIPS") gBE = (int)StringToInteger(val);
-      else if (key == "TRAIL") gTrail = (StringToInteger(val) != 0);
+      else if (key == "TRAIL") gTrail = configBool(val);
       else if (key == "TRAIL_PIPS") gTrailPips = (int)StringToInteger(val);
       else if (key == "LOG_EVERY") gLogEvery = (int)StringToInteger(val);
       else if (key == "TARGET_PROFIT") gTargetProfit = (int)StringToInteger(val);
-      else if (key == "TRACK_EXECUTION") gTrackExecution = (StringToInteger(val) != 0);
+      else if (key == "TRACK_EXECUTION") gTrackExecution = configBool(val);
       else if (key == "SNAP_INTERVAL_SEC") gSnapIntervalSec = (int)StringToInteger(val);
-      else if (key == "TRACK_BRIDGE_CLOSES") gTrackBridgeCloses = (StringToInteger(val) != 0);
+      else if (key == "TRACK_BRIDGE_CLOSES") gTrackBridgeCloses = configBool(val);
       else if (key == "LOG_CLOSED_EVERY") gLogClosedEvery = (int)StringToInteger(val);
-      else if (key == "SCALP_MODE") gScalpMode = (StringToInteger(val) != 0);
+      else if (key == "SCALP_MODE") gScalpMode = configBool(val);
       else if (key == "W_TICK_IMB") gWTickImb = StringToDouble(val);
       else if (key == "W_SPREAD_COMP") gWSpreadComp = StringToDouble(val);
       else if (key == "W_QUOTE_VEL") gWQuoteVel = StringToDouble(val);
@@ -496,15 +504,15 @@ void ReadConfig() {
       else if (key == "W_CROSS_SYNC") gWCrossSync = StringToDouble(val);
       else if (key == "W_ENTROPY") gWEntropy = StringToDouble(val);
       else if (key == "MIN_AGREEING") gMinAgreeing = (int)StringToInteger(val);
-       else if (key == "KILL_LONDON") gKillLondon = (StringToInteger(val) != 0);
-       else if (key == "KILL_LONDON_START") gKillLondonStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
-       else if (key == "KILL_LONDON_END") gKillLondonEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
-       else if (key == "KILL_NY") gKillNY = (StringToInteger(val) != 0);
-       else if (key == "KILL_NY_START") gKillNYStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
-       else if (key == "KILL_NY_END") gKillNYEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
-       else if (key == "KILL_ASIAN") gKillAsian = (StringToInteger(val) != 0);
-       else if (key == "KILL_ASIAN_START") gKillAsianStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
-       else if (key == "KILL_ASIAN_END") gKillAsianEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_LONDON") gKillLondon = configBool(val);
+        else if (key == "KILL_LONDON_START") gKillLondonStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_LONDON_END") gKillLondonEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_NY") gKillNY = configBool(val);
+        else if (key == "KILL_NY_START") gKillNYStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_NY_END") gKillNYEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_ASIAN") gKillAsian = configBool(val);
+        else if (key == "KILL_ASIAN_START") gKillAsianStart = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
+        else if (key == "KILL_ASIAN_END") gKillAsianEnd = (StringToInteger(val)/100)*60 + (StringToInteger(val)%100);
       else if (key == "DAILY_LOSS_PCT") gDailyLossPct = StringToDouble(val);
       else if (key == "DAILY_HARD_KILL") gDailyHardKill = StringToDouble(val);
       else if (key == "TRADE_PER_HOUR_MAX") gTradePerHourMax = (int)StringToInteger(val);
@@ -512,7 +520,7 @@ void ReadConfig() {
       else if (key == "ADAPTIVE_COOLDOWN_SEC") gAdaptiveCooldownSec = (int)StringToInteger(val);
       else if (key == "RECENT_WINRATE_PAUSE")  gRecentWinRatePause = StringToDouble(val);
       else if (key == "MIN_TICKS_PER_SECOND")  gMinTicksPerSecond = StringToDouble(val);
-      else if (key == "CORRELATION_FILTER") gCorrelationFilter = (StringToInteger(val) != 0);
+      else if (key == "CORRELATION_FILTER") gCorrelationFilter = configBool(val);
       else if (key == "ATR_MIN_PIPS") gAtrMinPips = StringToDouble(val);
       else if (key == "MAX_LOT_CAP") gMaxLotCap = StringToDouble(val);
       else Print("Unknown config key: ", key);
@@ -556,15 +564,22 @@ int OnInit() {
     string parts[];
 
     if (gSymbols == "AUTO" || gSymbols == "auto") {
-       Print("SYMBOLS=AUTO detected — pulling all MarketWatch symbols via SymbolsTotal(true)");
-       n = SymbolsTotal(true);
-       ArrayResize(parts, n);
-       for (int i = 0; i < n; i++) {
-          parts[i] = SymbolName(i, true);
-          ENUM_SYMBOL_CLASS cls = getSymbolClass(parts[i]);
-          Print("  AUTO[", i, "] ", parts[i], " class=", cls, " (maxLot=", getSymbolMaxLot(parts[i]),
-                " sl=", getSymbolMinSL(parts[i]), "-", getSymbolMaxSL(parts[i]), "p)");
+       Print("SYMBOLS=AUTO detected — filtering MarketWatch by symbol class");
+       int total = SymbolsTotal(true);
+       ArrayResize(parts, total);
+       n = 0;
+       for (int i = 0; i < total; i++) {
+          string sym = SymbolName(i, true);
+          ENUM_SYMBOL_CLASS cls = getSymbolClass(sym);
+          if (cls == SYM_CLASS_UNKNOWN) continue;
+          parts[n] = sym;
+          Print("  AUTO[", n, "] ", sym, " class=", cls, " (maxLot=", getSymbolMaxLot(sym),
+                " sl=", getSymbolMinSL(sym), "-", getSymbolMaxSL(sym), "p)");
+          n++;
+          if (n >= 100) { Print("  AUTO limit (100) reached at total symbol ", i); break; }
        }
+       ArrayResize(parts, n);
+       Print("AUTO scan complete: ", n, " tradeable symbols found out of ", total);
     } else {
        n = StringSplit(gSymbols, ',', parts);
     }
