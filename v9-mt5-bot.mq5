@@ -125,6 +125,7 @@ int      gFailCount = 0;
 datetime gLastHourlyLog = 0;
 int      gCurrentDay = -1;
 double   gMaxLotCap;
+int      gScanIndex = 0;
 
 // === Trade-rate counters / monitoring ===
 int      gTradesThisHour = 0;
@@ -190,6 +191,7 @@ int      processedCount = 0;
 //| Tick data structures                                             |
 //+------------------------------------------------------------------+
 #define MAX_TICK_BUF 100
+#define SCAN_BATCH_SIZE 10
 
 struct TickSample {
    double bid;
@@ -260,7 +262,7 @@ SymbolState symSt[];
 
 datetime lastScanTime;
 int      timerMs = 50;
-int      scanIntervalMs = 200;
+int      scanIntervalMs = 50;
 int      tickCount = 0;
 int      snapCounter = 0;
 double   dailyNetProfit = 0;
@@ -1328,91 +1330,96 @@ void scanSymbols() {
 
     int placed = 0, skippedPos = 0, skippedCool = 0, skippedSpread = 0, skippedCorr = 0, noSig = 0, skippedClass = 0, skippedRegime = 0, skippedTPS = 0;
 
-     for (int s = 0; s < symCount; s++) {
-       if (openCount + placed >= gMaxOpen) break;
+     int batchStart = gScanIndex;
+     int batch = 0;
+     while (batch < SCAN_BATCH_SIZE && gScanIndex < symCount) {
+        int s = gScanIndex++;
+        batch++;
+        if (openCount + placed >= gMaxOpen) break;
 
-       ENUM_SYMBOL_CLASS cls = getSymbolClass(syms[s]);
-       if (cls == SYM_CLASS_UNKNOWN) { skippedClass++; continue; }
+        ENUM_SYMBOL_CLASS cls = getSymbolClass(syms[s]);
+        if (cls == SYM_CLASS_UNKNOWN) { skippedClass++; continue; }
 
-       // ticks-per-second guard (low liquidity = unreliable signals)
-       if (symSt[s].ticksPerSecond > 0 && symSt[s].ticksPerSecond < gMinTicksPerSecond) { skippedTPS++; continue; }
+        // ticks-per-second guard (low liquidity = unreliable signals)
+        if (symSt[s].ticksPerSecond > 0 && symSt[s].ticksPerSecond < gMinTicksPerSecond) { skippedTPS++; continue; }
 
-       if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
-       if (hasPos(syms[s])) { skippedPos++; continue; }
-       if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
-        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) { skippedCool++; continue; }
-        if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
+        if (ts[s].failUntil > TimeCurrent()) { skippedPos++; continue; }
+        if (hasPos(syms[s])) { skippedPos++; continue; }
+        if (TimeCurrent() - ts[s].lastSignalTime < gCooldown) { skippedCool++; continue; }
+         if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 120) { skippedCool++; continue; }
+         if (hasCorrelatedOpen(syms[s])) { skippedCorr++; continue; }
 
-        // anti-flip: same direction as the most recent close on the same symbol → block
-        if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 600) { skippedCool++; continue; }
+         // anti-flip: same direction as the most recent close on the same symbol → block
+         if (ts[s].lastCloseTime > 0 && TimeCurrent() - ts[s].lastCloseTime < 600) { skippedCool++; continue; }
 
-        MqlRates r1[], r5[], r15[];
-        int got1, got5, got15;
-        if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
-           noSig++; continue;
-        }
+         MqlRates r1[], r5[], r15[];
+         int got1, got5, got15;
+         if (!getMtfRates(syms[s], PERIOD_M1, PERIOD_M5, PERIOD_M15, r1, r5, r15, got1, got5, got15)) {
+            noSig++; continue;
+         }
 
-        double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
-        SymbolClassConfig clsCfg = getSymbolClassConfig(cls);
-        if (sp > clsCfg.maxSpreadPoints) { skippedSpread++; continue; }
+         double sp = (double)SymbolInfoInteger(syms[s], SYMBOL_SPREAD);
+         SymbolClassConfig clsCfg = getSymbolClassConfig(cls);
+         if (sp > clsCfg.maxSpreadPoints) { skippedSpread++; continue; }
 
-        double atr = calcAtr(r1, got1, 14);
-        double pt  = SymbolInfoDouble(syms[s], SYMBOL_POINT);
-        int    dgt = (int)SymbolInfoInteger(syms[s], SYMBOL_DIGITS);
-        double pipMult = (dgt == 3 || dgt == 5) ? 10.0 : 1.0;
-        double atrPips = (pt > 0) ? (atr / pt / pipMult) : 0;
-        if (atrPips < MathMax(gAtrMinPips, clsCfg.atrMinPipsFloor)) { noSig++; continue; }
+         double atr = calcAtr(r1, got1, 14);
+         double pt  = SymbolInfoDouble(syms[s], SYMBOL_POINT);
+         int    dgt = (int)SymbolInfoInteger(syms[s], SYMBOL_DIGITS);
+         double pipMult = (dgt == 3 || dgt == 5) ? 10.0 : 1.0;
+         double atrPips = (pt > 0) ? (atr / pt / pipMult) : 0;
+         if (atrPips < MathMax(gAtrMinPips, clsCfg.atrMinPipsFloor)) { noSig++; continue; }
 
-        // regime check
-        double adxM5 = calcAdx(r5, got5, 14);
-        ENUM_MARKET_REGIME regime = getMarketRegime(syms[s], adxM5, atrPips);
-        double tradeability = regimeTradeability(cls, regime);
-        if (tradeability <= 0.0) { skippedRegime++; continue; }
+         // regime check
+         double adxM5 = calcAdx(r5, got5, 14);
+         ENUM_MARKET_REGIME regime = getMarketRegime(syms[s], adxM5, atrPips);
+         double tradeability = regimeTradeability(cls, regime);
+         if (tradeability <= 0.0) { skippedRegime++; continue; }
 
-        HybridSignal sig;
-        if (getHybridSignal(s, sig)) {
-           if (tickCount % gLogEvery == 0)
-              Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
-                    " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
-                    " spreadComp=", DoubleToString(calcSpreadCompression(s), 2),
-                    " regime=", regime, " tradeability=", DoubleToString(tradeability, 2));
-           if (execScalpTrade(s, syms[s], sig, cls, clsCfg)) {
-              ts[s].lastSignalTime = TimeCurrent();
-              placed++;
-              gTradesThisHour++;
-              gTradesThisDay++;
-           }
-        } else {
-           noSig++;
-           if (tickCount % gLogEvery == 0) {
-              double imb2 = calcTickImbalance(s);
-              double sc2 = calcSpreadCompression(s);
-              double vl2 = calcQuoteVelocity(s);
-              double pl2 = calcMicroPullback(s);
-              double sy2 = calcCrossSync(s);
-              double en2 = calcTickEntropy(s);
-              int agree = 0;
-              if (imb2 > 0) agree++;
-              if (sc2 > 0) agree++;
-              if (vl2 > 0) agree++;
-              if (pl2 > 0) agree++;
-              if (sy2 > 0) agree++;
-              if (en2 > 0) agree++;
-              Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
-                    " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
-                    " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
-                    " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2),
-                    " regime=", regime, " tps=", symSt[s].ticksPerSecond);
-           }
-        }
-     }
+         HybridSignal sig;
+         if (getHybridSignal(s, sig)) {
+            if (tickCount % gLogEvery == 0)
+               Print(">>> ", syms[s], " | SCALP: ", sig.name, " side=", (sig.side == 1 ? "LONG" : "SHORT"),
+                     " score=", DoubleToString(sig.score, 2), " imb=", DoubleToString(calcTickImbalance(s), 2),
+                     " spreadComp=", DoubleToString(calcSpreadCompression(s), 2),
+                     " regime=", regime, " tradeability=", DoubleToString(tradeability, 2));
+            if (execScalpTrade(s, syms[s], sig, cls, clsCfg)) {
+               ts[s].lastSignalTime = TimeCurrent();
+               placed++;
+               gTradesThisHour++;
+               gTradesThisDay++;
+            }
+         } else {
+            noSig++;
+            if (tickCount % gLogEvery == 0) {
+               double imb2 = calcTickImbalance(s);
+               double sc2 = calcSpreadCompression(s);
+               double vl2 = calcQuoteVelocity(s);
+               double pl2 = calcMicroPullback(s);
+               double sy2 = calcCrossSync(s);
+               double en2 = calcTickEntropy(s);
+               int agree = 0;
+               if (imb2 > 0) agree++;
+               if (sc2 > 0) agree++;
+               if (vl2 > 0) agree++;
+               if (pl2 > 0) agree++;
+               if (sy2 > 0) agree++;
+               if (en2 > 0) agree++;
+               Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
+                     " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
+                     " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
+                     " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2),
+                     " regime=", regime, " tps=", symSt[s].ticksPerSecond);
+            }
+         }
+      }
+     if (gScanIndex >= symCount) gScanIndex = 0;
 
-    if (tickCount % gLogEvery == 0)
-       Print("=== SCAN | open=", openCount, " placed=", placed,
-             " hasPos=", skippedPos, " cooldown=", skippedCool,
-             " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig,
-             " class=", skippedClass, " regime=", skippedRegime, " tps=", skippedTPS,
-             " | hour=", gTradesThisHour, "/", gTradePerHourMax, " day=", gTradesThisDay, "/", gTradePerDayMax);
+     if (tickCount % gLogEvery == 0)
+        Print("=== BATCH[", batchStart, "-", (batchStart + batch - 1), "] | open=", openCount, " placed=", placed,
+              " hasPos=", skippedPos, " cooldown=", skippedCool,
+              " spread=", skippedSpread, " corr=", skippedCorr, " noSig=", noSig,
+              " class=", skippedClass, " regime=", skippedRegime, " tps=", skippedTPS,
+              " | hour=", gTradesThisHour, "/", gTradePerHourMax, " day=", gTradesThisDay, "/", gTradePerDayMax);
 }
 
 //+------------------------------------------------------------------+
