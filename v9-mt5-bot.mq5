@@ -18,7 +18,7 @@ input string InpSymbols     = "AUTO";
 input double InpRiskPercent = 0.25;
 input int    InpMaxOpen     = 3;
 input int    InpMagic       = 999001;
-input double InpMinScore    = 0.70;
+input double InpMinScore    = 0.55;
 input double InpMaxSpread   = 30.0;
 input int    InpCooldownSec = 30;
 input int    InpMinSLPips   = 3;
@@ -193,7 +193,7 @@ int      processedCount = 0;
 //+------------------------------------------------------------------+
 #define MAX_TICK_BUF 100
 #define SCAN_BATCH_SIZE 10
-#define BUILD_NUMBER 14
+#define BUILD_NUMBER 15
 
 struct TickSample {
    double bid;
@@ -1408,7 +1408,9 @@ void scanSymbols() {
                if (pl2 > 0) agree++;
                if (sy2 > 0) agree++;
                if (en2 > 0) agree++;
-               Print("NO_SIG: ", syms[s], " agree=", agree, " tickCount=", symSt[s].tickCount,
+               double compSc = gWTickImb*imb2 + gWSpreadComp*sc2 + gWQuoteVel*vl2 + gWMicroPull*pl2 + gWCrossSync*sy2 + gWEntropy*en2;
+               Print("NO_SIG: ", syms[s], " agree=", agree, " score=", DoubleToString(compSc,2),
+                     " need=", DoubleToString(gMinScore,2), " tickCount=", symSt[s].tickCount,
                      " imb=", DoubleToString(imb2,2), " spreadComp=", DoubleToString(sc2,2),
                      " vel=", DoubleToString(vl2,2), " pull=", DoubleToString(pl2,2),
                      " sync=", DoubleToString(sy2,2), " entropy=", DoubleToString(en2,2),
