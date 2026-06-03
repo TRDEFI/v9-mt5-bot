@@ -1304,8 +1304,7 @@ void managePositions() {
 //| Scan all symbols for trade signals                                |
 //+------------------------------------------------------------------+
 void scanSymbols() {
-    if (!isKillZoneActive()) return;
-    if (isDailyLossLimitHit()) {
+     if (isDailyLossLimitHit()) {
        if (tickCount % gLogEvery == 0) Print("=== DAILY LOSS LIMIT HIT — pausing trading ===");
        return;
     }
